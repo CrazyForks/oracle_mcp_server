@@ -271,7 +271,7 @@ func (s *Server) handleInitialize(req *jsonRPCRequest) {
 
 // handleToolsList returns the list of available tools.
 func (s *Server) handleToolsList(req *jsonRPCRequest) {
-		result := toolsListResult{
+	result := toolsListResult{
 		Tools: []tool{
 			{
 				Name:        "execute_sql",
@@ -320,7 +320,7 @@ func (s *Server) handleToolsList(req *jsonRPCRequest) {
 			},
 			{
 				Name:        "query_to_csv_file",
-				Description: "Execute the given SQL and write the result to a file as CSV (header + data rows, UTF-8). Format follows RFC 4180. CLOB columns are read in full. file_path must be absolute. No confirmation dialog.",
+				Description: "Execute the given SQL and write the result to a file as CSV (header + data rows, UTF-8). Format follows RFC 4180. CLOB columns are read in full. file_path must be absolute. Same safety review as execute_sql (danger_keywords / optional DDL confirm) before running.",
 				InputSchema: inputSchema{
 					Type: "object",
 					Properties: map[string]property{
@@ -342,7 +342,7 @@ func (s *Server) handleToolsList(req *jsonRPCRequest) {
 			},
 			{
 				Name:        "query_to_text_file",
-				Description: "Execute the given SQL and write the result to a file as plain text: no header, columns tab-separated. No extra newlines between rows; only newlines in the cell data are written. CLOB columns are read in full. Use for procedure source or any query (including CLOB). file_path must be absolute. No confirmation dialog.",
+				Description: "Execute the given SQL and write the result to a file as plain text: no header, columns tab-separated. No extra newlines between rows; only newlines in the cell data are written. CLOB columns are read in full. Use for procedure source or any query (including CLOB). file_path must be absolute. Same safety review as execute_sql (danger_keywords / optional DDL confirm) before running.",
 				InputSchema: inputSchema{
 					Type: "object",
 					Properties: map[string]property{
@@ -392,6 +392,42 @@ func (s *Server) handleToolsCall(req *jsonRPCRequest) {
 	}
 }
 
+// tryConfirmDangerousSQL runs the same analysis/review flow as execute_sql. sourceLabel is optional (e.g. file or export path).
+// If it returns false, a JSON-RPC error or tool error has already been sent.
+func (s *Server) tryConfirmDangerousSQL(req *jsonRPCRequest, sql, displayConnection, sourceLabel string) (*sqlanalyzer.AnalysisResult, string, bool) {
+	analysis := s.analyzer.Analyze(sql)
+	stmtType := sqlanalyzer.GetStatementType(sql)
+	needsConfirmation := analysis.IsDangerous ||
+		(s.config.Security.RequireConfirmForDDL && analysis.IsDDL)
+	if !needsConfirmation {
+		return analysis, stmtType, true
+	}
+	confirmReq := &confirm.ConfirmRequest{
+		SQL:             sql,
+		MatchedKeywords: analysis.MatchedKeywords,
+		StatementType:   stmtType,
+		IsDDL:           analysis.IsDDL,
+		Connection:      displayConnection,
+		ConnectionIndex: connectionIndexInPool(s.executorPool, displayConnection),
+		SourceLabel:     sourceLabel,
+	}
+	approved, err := s.confirmer.Confirm(confirmReq)
+	if err != nil {
+		s.logAudit(sql, analysis.MatchedKeywords, false, "CONFIRM_ERROR: "+err.Error(), displayConnection)
+		s.sendToolError(req.ID, fmt.Sprintf("Confirmation dialog error: %v", err))
+		return nil, "", false
+	}
+	if !approved {
+		s.logAudit(sql, analysis.MatchedKeywords, false, "USER_REJECTED", displayConnection)
+		s.sendError(req.ID, ErrCodeUserRejected, "Execution cancelled by user", map[string]interface{}{
+			"code":             "USER_REJECTED",
+			"matched_keywords": analysis.MatchedKeywords,
+		})
+		return nil, "", false
+	}
+	return analysis, stmtType, true
+}
+
 // handleExecuteSQL handles the execute_sql tool.
 func (s *Server) handleExecuteSQL(req *jsonRPCRequest, args map[string]interface{}) {
 	// Extract SQL from arguments
@@ -423,39 +459,9 @@ func (s *Server) handleExecuteSQL(req *jsonRPCRequest, args map[string]interface
 		}
 	}
 
-	// Analyze the SQL
-	analysis := s.analyzer.Analyze(sql)
-	stmtType := sqlanalyzer.GetStatementType(sql)
-
-	// Confirmation when SQL contains config danger_keywords or is DDL (do not match "create" inside string literals)
-	needsConfirmation := analysis.IsDangerous ||
-		(s.config.Security.RequireConfirmForDDL && analysis.IsDDL)
-
-	if needsConfirmation {
-		confirmReq := &confirm.ConfirmRequest{
-			SQL:             sql,
-			MatchedKeywords: analysis.MatchedKeywords,
-			StatementType:   stmtType,
-			IsDDL:           analysis.IsDDL,
-			Connection:      displayConnection,
-			ConnectionIndex: connectionIndexInPool(s.executorPool, displayConnection),
-		}
-
-		approved, err := s.confirmer.Confirm(confirmReq)
-		if err != nil {
-			s.logAudit(sql, analysis.MatchedKeywords, false, "CONFIRM_ERROR: "+err.Error(), displayConnection)
-			s.sendToolError(req.ID, fmt.Sprintf("Confirmation dialog error: %v", err))
-			return
-		}
-
-		if !approved {
-			s.logAudit(sql, analysis.MatchedKeywords, false, "USER_REJECTED", displayConnection)
-			s.sendError(req.ID, ErrCodeUserRejected, "Execution cancelled by user", map[string]interface{}{
-				"code":             "USER_REJECTED",
-				"matched_keywords": analysis.MatchedKeywords,
-			})
-			return
-		}
+	analysis, stmtType, ok := s.tryConfirmDangerousSQL(req, sql, displayConnection, "")
+	if !ok {
+		return
 	}
 
 	// Execute the SQL on the chosen connection
@@ -540,38 +546,9 @@ func (s *Server) handleExecuteSQLFile(req *jsonRPCRequest, args map[string]inter
 		}
 	}
 
-	analysis := s.analyzer.Analyze(sql)
-	stmtType := sqlanalyzer.GetStatementType(sql)
-
-	needsConfirmation := analysis.IsDangerous ||
-		(s.config.Security.RequireConfirmForDDL && analysis.IsDDL)
-
-	if needsConfirmation {
-		confirmReq := &confirm.ConfirmRequest{
-			SQL:             sql,
-			MatchedKeywords: analysis.MatchedKeywords,
-			StatementType:   stmtType,
-			IsDDL:           analysis.IsDDL,
-			Connection:      displayConnection,
-			ConnectionIndex: connectionIndexInPool(s.executorPool, displayConnection),
-			SourceLabel:     "File: " + filePath,
-		}
-
-		approved, err := s.confirmer.Confirm(confirmReq)
-		if err != nil {
-			s.logAudit(sql, analysis.MatchedKeywords, false, "CONFIRM_ERROR: "+err.Error(), displayConnection)
-			s.sendToolError(req.ID, fmt.Sprintf("Confirmation dialog error: %v", err))
-			return
-		}
-
-		if !approved {
-			s.logAudit(sql, analysis.MatchedKeywords, false, "USER_REJECTED", displayConnection)
-			s.sendError(req.ID, ErrCodeUserRejected, "Execution cancelled by user", map[string]interface{}{
-				"code":             "USER_REJECTED",
-				"matched_keywords": analysis.MatchedKeywords,
-			})
-			return
-		}
+	analysis, stmtType, ok := s.tryConfirmDangerousSQL(req, sql, displayConnection, "File: "+filePath)
+	if !ok {
+		return
 	}
 
 	ctx := context.Background()
@@ -614,7 +591,7 @@ func (s *Server) handleListConnections(req *jsonRPCRequest) {
 	s.sendToolResult(req.ID, string(resultJSON))
 }
 
-// handleQueryToCSVFile handles the query_to_csv_file tool. No confirmation dialog; file_path must be absolute.
+// handleQueryToCSVFile handles the query_to_csv_file tool. Same danger/DDL review as execute_sql; file_path must be absolute.
 func (s *Server) handleQueryToCSVFile(req *jsonRPCRequest, args map[string]interface{}) {
 	sqlArg, ok := args["sql"]
 	if !ok {
@@ -668,10 +645,15 @@ func (s *Server) handleQueryToCSVFile(req *jsonRPCRequest, args map[string]inter
 		displayConnection = "default"
 	}
 
+	analysis, _, ok := s.tryConfirmDangerousSQL(req, sqlStr, displayConnection, "CSV output: "+filePath)
+	if !ok {
+		return
+	}
+
 	ctx := context.Background()
 	rowsWritten, err := s.executorPool.ExecuteToCSVFile(ctx, connectionName, sqlStr, filePath)
 	if err != nil {
-		s.logAudit(sqlStr, nil, false, "QUERY_TO_CSV_ERROR: "+err.Error(), displayConnection)
+		s.logAudit(sqlStr, analysis.MatchedKeywords, false, "QUERY_TO_CSV_ERROR: "+err.Error(), displayConnection)
 		if strings.Contains(strings.ToLower(err.Error()), "unavailable") || strings.Contains(strings.ToLower(err.Error()), "connection") {
 			s.sendToolError(req.ID, "Connection is currently unavailable; call list_connections to retry.")
 		} else {
@@ -680,17 +662,17 @@ func (s *Server) handleQueryToCSVFile(req *jsonRPCRequest, args map[string]inter
 		return
 	}
 
-	s.logAudit(sqlStr, nil, true, "QUERY_TO_CSV", displayConnection)
+	s.logAudit(sqlStr, analysis.MatchedKeywords, true, "QUERY_TO_CSV", displayConnection)
 	out := map[string]interface{}{
-		"file_path":     filePath,
-		"rows_written":  rowsWritten,
-		"message":       "CSV written to " + filePath,
+		"file_path":    filePath,
+		"rows_written": rowsWritten,
+		"message":      "CSV written to " + filePath,
 	}
 	resultJSON, _ := json.MarshalIndent(out, "", "  ")
 	s.sendToolResult(req.ID, string(resultJSON))
 }
 
-// handleQueryToTextFile handles the query_to_text_file tool. No confirmation dialog; file_path must be absolute.
+// handleQueryToTextFile handles the query_to_text_file tool. Same danger/DDL review as execute_sql; file_path must be absolute.
 func (s *Server) handleQueryToTextFile(req *jsonRPCRequest, args map[string]interface{}) {
 	sqlArg, ok := args["sql"]
 	if !ok {
@@ -744,10 +726,15 @@ func (s *Server) handleQueryToTextFile(req *jsonRPCRequest, args map[string]inte
 		displayConnection = "default"
 	}
 
+	analysis, _, ok := s.tryConfirmDangerousSQL(req, sqlStr, displayConnection, "Text output: "+filePath)
+	if !ok {
+		return
+	}
+
 	ctx := context.Background()
 	rowsWritten, err := s.executorPool.ExecuteToTextFile(ctx, connectionName, sqlStr, filePath)
 	if err != nil {
-		s.logAudit(sqlStr, nil, false, "QUERY_TO_TEXT_ERROR: "+err.Error(), displayConnection)
+		s.logAudit(sqlStr, analysis.MatchedKeywords, false, "QUERY_TO_TEXT_ERROR: "+err.Error(), displayConnection)
 		if strings.Contains(strings.ToLower(err.Error()), "unavailable") || strings.Contains(strings.ToLower(err.Error()), "connection") {
 			s.sendToolError(req.ID, "Connection is currently unavailable; call list_connections to retry.")
 		} else {
@@ -756,11 +743,11 @@ func (s *Server) handleQueryToTextFile(req *jsonRPCRequest, args map[string]inte
 		return
 	}
 
-	s.logAudit(sqlStr, nil, true, "QUERY_TO_TEXT", displayConnection)
+	s.logAudit(sqlStr, analysis.MatchedKeywords, true, "QUERY_TO_TEXT", displayConnection)
 	out := map[string]interface{}{
-		"file_path":     filePath,
-		"rows_written":  rowsWritten,
-		"message":       "Text written to " + filePath,
+		"file_path":    filePath,
+		"rows_written": rowsWritten,
+		"message":      "Text written to " + filePath,
 	}
 	resultJSON, _ := json.MarshalIndent(out, "", "  ")
 	s.sendToolResult(req.ID, string(resultJSON))

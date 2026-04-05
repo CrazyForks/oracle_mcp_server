@@ -190,8 +190,8 @@ Replace `/path/to/oracle-mcp` and `/opt/oracle/instantclient_19_20` with your ac
 | **execute_sql** | Run SQL (one or multiple statements). Params: `sql`, optional `connection`. |
 | **execute_sql_file** | Read SQL from a file, analyze, show review if needed, then execute. Trailing `/` is stripped. Params: `file_path`, optional `connection`. |
 | **list_connections** | List configured connection names and availability; retries previously failed connections (only this tool re-validates—others fast-fail on unavailable connection until you call list_connections again). |
-| **query_to_csv_file** | Run a query and write the result to a file as CSV (header + rows, UTF-8, RFC 4180). Params: `sql`, `file_path` (absolute), optional `connection`. No confirmation dialog. |
-| **query_to_text_file** | Run a query and write the result to a file as plain text (tab-separated, no header; CLOB in full; e.g. for procedure source). Params: `sql`, `file_path` (absolute), optional `connection`. No confirmation dialog. |
+| **query_to_csv_file** | Run a query and write the result to a file as CSV (header + rows, UTF-8, RFC 4180). Params: `sql`, `file_path` (absolute), optional `connection`. Same review as `execute_sql` when SQL matches danger keywords or DDL (if enabled). |
+| **query_to_text_file** | Run a query and write the result to a file as plain text (tab-separated, no header; CLOB in full; e.g. for procedure source). Params: `sql`, `file_path` (absolute), optional `connection`. Same review as `execute_sql` when SQL matches danger keywords or DDL (if enabled). |
 
 ### Example Interactions
 
@@ -209,7 +209,7 @@ execute_sql_file({ "file_path": "d:\\scripts\\myscript.sql", "connection": "ps" 
 // See connection names and status
 list_connections()
 
-// Write query result to CSV or text file (file_path must be absolute; no confirmation)
+// Write query result to CSV or text file (file_path must be absolute; same review rules as execute_sql when needed)
 query_to_csv_file({ "sql": "SELECT * FROM my_table", "file_path": "d:\\out\\data.csv", "connection": "database1" })
 query_to_text_file({ "sql": "SELECT text FROM user_source WHERE name='MY_PROC'", "file_path": "d:\\out\\my_proc.sql" })
 ```
@@ -257,11 +257,11 @@ Execution proceeds only after the user confirms. Rejection is logged and returne
 
 ### Tool: `query_to_csv_file`
 
-**Input**: `sql` (required), `file_path` (required, absolute path), `connection` (optional). **Output**: success and path. No confirmation dialog. Writes CSV with header, UTF-8, RFC 4180; CLOB columns read in full.
+**Input**: `sql` (required), `file_path` (required, absolute path), `connection` (optional). **Output**: success and path. Same confirmation rules as `execute_sql` when SQL matches `danger_keywords` or is DDL (if `require_confirm_for_ddl`). Writes CSV with header, UTF-8, RFC 4180; CLOB columns read in full.
 
 ### Tool: `query_to_text_file`
 
-**Input**: `sql` (required), `file_path` (required, absolute path), `connection` (optional). **Output**: success and path. No confirmation dialog. Writes plain text, tab-separated columns, no header; CLOB in full (e.g. for procedure source).
+**Input**: `sql` (required), `file_path` (required, absolute path), `connection` (optional). **Output**: success and path. Same confirmation rules as `execute_sql` when SQL matches `danger_keywords` or is DDL (if `require_confirm_for_ddl`). Writes plain text, tab-separated columns, no header; CLOB in full (e.g. for procedure source).
 
 ## Troubleshooting
 
@@ -555,8 +555,8 @@ ADB 使用 **TCPS (SSL)**，需要 **Wallet**。连接串使用钱包中 `tnsnam
 | **execute_sql** | 执行 SQL（单条或多条）。参数：`sql`，可选 `connection`。 |
 | **execute_sql_file** | 从文件读取 SQL，分析、必要时展示确认，再执行。末尾 `/` 会被去除。参数：`file_path`，可选 `connection`。 |
 | **list_connections** | 列出已配置连接名称及可用性；会对之前失败的连接重试（仅此工具会重新校验—其他工具在连接不可用时直接报错，需再次调用 list_connections 后重试）。 |
-| **query_to_csv_file** | 执行查询并将结果写入文件为 CSV（表头+行，UTF-8，RFC 4180）。参数：`sql`、`file_path`（绝对路径），可选 `connection`。无确认对话框。 |
-| **query_to_text_file** | 执行查询并将结果写入文件为纯文本（制表符分隔、无表头；CLOB 完整输出，如存过程源码）。参数：`sql`、`file_path`（绝对路径），可选 `connection`。无确认对话框。 |
+| **query_to_csv_file** | 执行查询并将结果写入文件为 CSV（表头+行，UTF-8，RFC 4180）。参数：`sql`、`file_path`（绝对路径），可选 `connection`。与 `execute_sql` 相同：命中危险词或 DDL（若开启）时弹出审查。 |
+| **query_to_text_file** | 执行查询并将结果写入文件为纯文本（制表符分隔、无表头；CLOB 完整输出，如存过程源码）。参数：`sql`、`file_path`（绝对路径），可选 `connection`。与 `execute_sql` 相同：命中危险词或 DDL（若开启）时弹出审查。 |
 
 ### 使用示例
 
@@ -574,7 +574,7 @@ execute_sql_file({ "file_path": "d:\\scripts\\myscript.sql", "connection": "ps" 
 // 查看连接名称与状态
 list_connections()
 
-// 将查询结果写入 CSV 或文本文件（file_path 须为绝对路径；无确认）
+// 将查询结果写入 CSV 或文本文件（file_path 须为绝对路径；需要时与 execute_sql 相同审查规则）
 query_to_csv_file({ "sql": "SELECT * FROM my_table", "file_path": "d:\\out\\data.csv", "connection": "database1" })
 query_to_text_file({ "sql": "SELECT text FROM user_source WHERE name='MY_PROC'", "file_path": "d:\\out\\my_proc.sql" })
 ```
@@ -622,11 +622,11 @@ query_to_text_file({ "sql": "SELECT text FROM user_source WHERE name='MY_PROC'",
 
 ### 工具：`query_to_csv_file`
 
-**输入**：`sql`（必填）、`file_path`（必填，绝对路径）、`connection`（可选）。**输出**：成功及路径。无确认对话框。写入带表头的 CSV，UTF-8，RFC 4180；CLOB 列完整读取。
+**输入**：`sql`（必填）、`file_path`（必填，绝对路径）、`connection`（可选）。**输出**：成功及路径。与 `execute_sql` 相同：命中 `danger_keywords` 或为 DDL（若 `require_confirm_for_ddl`）时弹出确认。写入带表头的 CSV，UTF-8，RFC 4180；CLOB 列完整读取。
 
 ### 工具：`query_to_text_file`
 
-**输入**：`sql`（必填）、`file_path`（必填，绝对路径）、`connection`（可选）。**输出**：成功及路径。无确认对话框。写入纯文本，列以制表符分隔、无表头；CLOB 完整输出（如存过程源码）。
+**输入**：`sql`（必填）、`file_path`（必填，绝对路径）、`connection`（可选）。**输出**：成功及路径。与 `execute_sql` 相同：命中 `danger_keywords` 或为 DDL（若 `require_confirm_for_ddl`）时弹出确认。写入纯文本，列以制表符分隔、无表头；CLOB 完整输出（如存过程源码）。
 
 ## 故障排除
 
