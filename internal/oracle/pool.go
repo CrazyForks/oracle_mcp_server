@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -36,7 +37,13 @@ func NewExecutorPool(connections map[string]string) (*ExecutorPool, error) {
 	for name, dsn := range connections {
 		pool.dsns[name] = dsn
 	}
-	for name, dsn := range connections {
+	sortedNames := make([]string, 0, len(connections))
+	for name := range connections {
+		sortedNames = append(sortedNames, name)
+	}
+	sort.Strings(sortedNames)
+	for _, name := range sortedNames {
+		dsn := connections[name]
 		ex, err := NewExecutor(dsn)
 		if err != nil {
 			log.Printf("oracle-mcp: connection %q failed: %v", name, err)
