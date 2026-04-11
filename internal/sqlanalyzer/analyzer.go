@@ -28,6 +28,10 @@ type AnalysisResult struct {
 	ContainsPLSQL bool
 	// IsPLSQLCreationDDL is true when the SQL is a single CREATE PROCEDURE/FUNCTION/PACKAGE ... END; (allowed to run).
 	IsPLSQLCreationDDL bool
+	// ExplicitSchemas contains simple detections of schema-qualified object references like hr.employees.
+	ExplicitSchemas []string
+	// HasExplicitSchema is true when a simple schema-qualified object reference was detected.
+	HasExplicitSchema bool
 }
 
 // Analyzer performs SQL safety analysis.
@@ -84,6 +88,8 @@ func (a *Analyzer) Analyze(sql string) *AnalysisResult {
 	// Step 3: Check for multiple statements and PL/SQL creation DDL
 	result.IsPLSQLCreationDDL = isPLSQLCreationDDL(noStrings)
 	result.IsMultiStatement = isMultiStatement(noStrings)
+	result.ExplicitSchemas = detectExplicitSchemas(noStrings)
+	result.HasExplicitSchema = len(result.ExplicitSchemas) > 0
 
 	// Step 4: Check for PL/SQL blocks (unless it's a CREATE PROCEDURE/FUNCTION/PACKAGE)
 	result.ContainsPLSQL = !result.IsPLSQLCreationDDL && containsPLSQL(noStrings)
@@ -144,6 +150,45 @@ func removeStringLiterals(sql string) string {
 	}
 
 	return result.String()
+}
+
+var explicitSchemaPattern = regexp.MustCompile(`(?is)\b(?:from|join|update|insert\s+into|merge\s+into|delete\s+from|truncate\s+table|create(?:\s+or\s+replace)?\s+(?:table|view|index|sequence|trigger|procedure|function|package)|alter\s+(?:table|view|index|sequence|trigger|procedure|function|package)|drop\s+(?:table|view|index|sequence|trigger|procedure|function|package)|comment\s+on\s+(?:table|column)|rename)\s+("[^"]+"|[a-zA-Z_][a-zA-Z0-9_$#]*)\s*\.\s*("[^"]+"|[a-zA-Z_][a-zA-Z0-9_$#]*)`)
+
+func detectExplicitSchemas(sql string) []string {
+	matches := explicitSchemaPattern.FindAllStringSubmatch(sql, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{})
+	var schemas []string
+	for _, match := range matches {
+		if len(match) < 2 {
+			continue
+		}
+		schema := normalizeSchemaName(match[1])
+		if schema == "" {
+			continue
+		}
+		key := strings.ToLower(schema)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		schemas = append(schemas, schema)
+	}
+	return schemas
+}
+
+func normalizeSchemaName(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	if strings.HasPrefix(name, `"`) && strings.HasSuffix(name, `"`) && len(name) >= 2 {
+		return strings.Trim(name, `"`)
+	}
+	return strings.ToLower(name)
 }
 
 // IsSingleStatementBlock reports whether the entire SQL should be executed as one (no split).

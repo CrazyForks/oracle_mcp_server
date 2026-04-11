@@ -68,13 +68,14 @@ func TestAnalyzer_Analyze(t *testing.T) {
 	analyzer := NewAnalyzer([]string{"truncate", "drop", "alter system"}, "tokens")
 
 	tests := []struct {
-		name             string
-		sql              string
-		wantDangerous    bool
-		wantDDL          bool
-		wantKeywords     []string
-		wantMultiStmt    bool
-		wantPLSQL        bool
+		name          string
+		sql           string
+		wantDangerous bool
+		wantDDL       bool
+		wantKeywords  []string
+		wantMultiStmt bool
+		wantPLSQL     bool
+		wantSchemas   []string
 	}{
 		{
 			name:          "simple select",
@@ -137,6 +138,20 @@ func TestAnalyzer_Analyze(t *testing.T) {
 			wantDDL:       true,
 			wantKeywords:  nil,
 		},
+		{
+			name:          "explicit schema in select",
+			sql:           "SELECT * FROM hr.employees",
+			wantDangerous: false,
+			wantDDL:       false,
+			wantSchemas:   []string{"hr"},
+		},
+		{
+			name:          "explicit schema in quoted create",
+			sql:           `CREATE TABLE "HR"."EMPLOYEES" (id NUMBER)`,
+			wantDangerous: false,
+			wantDDL:       true,
+			wantSchemas:   []string{"HR"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -154,6 +169,18 @@ func TestAnalyzer_Analyze(t *testing.T) {
 			}
 			if result.ContainsPLSQL != tt.wantPLSQL {
 				t.Errorf("ContainsPLSQL = %v, want %v", result.ContainsPLSQL, tt.wantPLSQL)
+			}
+			if len(result.ExplicitSchemas) != len(tt.wantSchemas) {
+				t.Errorf("ExplicitSchemas = %v, want %v", result.ExplicitSchemas, tt.wantSchemas)
+			} else {
+				for i, schema := range tt.wantSchemas {
+					if result.ExplicitSchemas[i] != schema {
+						t.Errorf("ExplicitSchemas[%d] = %v, want %v", i, result.ExplicitSchemas[i], schema)
+					}
+				}
+			}
+			if result.HasExplicitSchema != (len(tt.wantSchemas) > 0) {
+				t.Errorf("HasExplicitSchema = %v, want %v", result.HasExplicitSchema, len(tt.wantSchemas) > 0)
 			}
 
 			if tt.wantKeywords != nil {

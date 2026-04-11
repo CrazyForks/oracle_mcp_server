@@ -187,11 +187,11 @@ Replace `/path/to/oracle-mcp` and `/opt/oracle/instantclient_19_20` with your ac
 
 | Tool | Description |
 |------|-------------|
-| **execute_sql** | Run SQL (one or multiple statements). Params: `sql`, optional `connection`. |
-| **execute_sql_file** | Read SQL from a file, analyze, show review if needed, then execute. Trailing `/` is stripped. Params: `file_path`, optional `connection`. |
+| **execute_sql** | Run SQL (one or multiple statements). Params: `sql`, optional `connection`. Do not specify schema-qualified object names such as `hr.employees`; the server rejects them. |
+| **execute_sql_file** | Read SQL from a file, analyze, show review if needed, then execute. Trailing `/` is stripped. Params: `file_path`, optional `connection`. SQL in the file must not specify schema-qualified object names such as `hr.employees`. |
 | **list_connections** | List configured connection names and availability; retries previously failed connections (only this tool re-validates—others fast-fail on unavailable connection until you call list_connections again). |
-| **query_to_csv_file** | Run a query and write the result to a file as CSV (header + rows, UTF-8, RFC 4180). Params: `sql`, `file_path` (absolute), optional `connection`. Same review as `execute_sql` when SQL matches danger keywords or DDL (if enabled). |
-| **query_to_text_file** | Run a query and write the result to a file as plain text (tab-separated, no header; CLOB in full; e.g. for procedure source). Params: `sql`, `file_path` (absolute), optional `connection`. Same review as `execute_sql` when SQL matches danger keywords or DDL (if enabled). |
+| **query_to_csv_file** | Run a query and write the result to a file as CSV (header + rows, UTF-8, RFC 4180). Params: `sql`, `file_path` (absolute), optional `connection`. Same review as `execute_sql` when SQL matches danger keywords or DDL (if enabled). Do not specify schema-qualified object names such as `hr.employees`. |
+| **query_to_text_file** | Run a query and write the result to a file as plain text (tab-separated, no header; CLOB in full; e.g. for procedure source). Params: `sql`, `file_path` (absolute), optional `connection`. Same review as `execute_sql` when SQL matches danger keywords or DDL (if enabled). Do not specify schema-qualified object names such as `hr.employees`. |
 
 ### Example Interactions
 
@@ -239,7 +239,7 @@ Execution proceeds only after the user confirms. Rejection is logged and returne
 
 ### Tool: `execute_sql`
 
-**Input**: `sql` (required), `connection` (optional).
+**Input**: `sql` (required), `connection` (optional). Do not specify schema-qualified object names such as `hr.employees`; the server rejects them.
 
 **Output (query)**: `columns`, `rows`, `statement_type`, `execution_time_ms`, `success`.
 

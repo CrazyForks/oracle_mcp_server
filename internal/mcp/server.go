@@ -111,15 +111,16 @@ type contentItem struct {
 
 // Error codes
 const (
-	ErrCodeParseError     = -32700
-	ErrCodeInvalidRequest = -32600
-	ErrCodeMethodNotFound = -32601
-	ErrCodeInvalidParams  = -32602
-	ErrCodeInternal       = -32603
-	ErrCodeUserRejected   = -32000
-	ErrCodeMultiStatement = -32001
-	ErrCodePLSQLBlock     = -32002
-	ErrCodeSQLExecution   = -32003
+	ErrCodeParseError      = -32700
+	ErrCodeInvalidRequest  = -32600
+	ErrCodeMethodNotFound  = -32601
+	ErrCodeInvalidParams   = -32602
+	ErrCodeInternal        = -32603
+	ErrCodeUserRejected    = -32000
+	ErrCodeMultiStatement  = -32001
+	ErrCodePLSQLBlock      = -32002
+	ErrCodeSQLExecution    = -32003
+	ErrCodeSchemaQualified = -32004
 )
 
 // Server is the MCP server implementation.
@@ -275,13 +276,13 @@ func (s *Server) handleToolsList(req *jsonRPCRequest) {
 		Tools: []tool{
 			{
 				Name:        "execute_sql",
-				Description: "Execute SQL against an Oracle database. When multiple databases are configured (e.g. source and target), use the 'connection' argument to choose which one (call list_connections to see names). Supports SELECT, INSERT, UPDATE, DELETE, DDL (CREATE, DROP, ALTER, etc.), and multiple statements. Multiple statements: one per line, each line ending with a semicolon. DDL is auto-committed. SQL that matches config danger_keywords will open a confirmation window showing the full SQL.",
+				Description: "Execute SQL against an Oracle database. When multiple databases are configured (e.g. source and target), use the 'connection' argument to choose which one (call list_connections to see names). Supports SELECT, INSERT, UPDATE, DELETE, DDL (CREATE, DROP, ALTER, etc.), and multiple statements. Multiple statements: one per line, each line ending with a semicolon. DDL is auto-committed. SQL that matches config danger_keywords will open a confirmation window showing the full SQL. Do not specify schema-qualified object names such as hr.employees.",
 				InputSchema: inputSchema{
 					Type: "object",
 					Properties: map[string]property{
 						"sql": {
 							Type:        "string",
-							Description: "SQL to run: one statement, or multiple statements (one per line, each line ending with semicolon).",
+							Description: "SQL to run: one statement, or multiple statements (one per line, each line ending with semicolon). Do not specify schema-qualified object names such as hr.employees.",
 						},
 						"connection": {
 							Type:        "string",
@@ -293,7 +294,7 @@ func (s *Server) handleToolsList(req *jsonRPCRequest) {
 			},
 			{
 				Name:        "execute_sql_file",
-				Description: "Read SQL from a file, analyze it (same rules as execute_sql). If review is required (danger_keywords or DDL), a confirmation window shows the formatted full file content. On approve, execute the file contents. File path is resolved from server process working directory if relative.",
+				Description: "Read SQL from a file, analyze it (same rules as execute_sql). If review is required (danger_keywords or DDL), a confirmation window shows the formatted full file content. On approve, execute the file contents. File path is resolved from server process working directory if relative. SQL in the file must not specify schema-qualified object names such as hr.employees.",
 				InputSchema: inputSchema{
 					Type: "object",
 					Properties: map[string]property{
@@ -320,13 +321,13 @@ func (s *Server) handleToolsList(req *jsonRPCRequest) {
 			},
 			{
 				Name:        "query_to_csv_file",
-				Description: "Execute the given SQL and write the result to a file as CSV (header + data rows, UTF-8). Format follows RFC 4180. CLOB columns are read in full. file_path must be absolute. Same safety review as execute_sql (danger_keywords / optional DDL confirm) before running.",
+				Description: "Execute the given SQL and write the result to a file as CSV (header + data rows, UTF-8). Format follows RFC 4180. CLOB columns are read in full. file_path must be absolute. Same safety review as execute_sql (danger_keywords / optional DDL confirm) before running. Do not specify schema-qualified object names such as hr.employees.",
 				InputSchema: inputSchema{
 					Type: "object",
 					Properties: map[string]property{
 						"sql": {
 							Type:        "string",
-							Description: "SQL to run (e.g. SELECT). Single or multiple statements; last result is written.",
+							Description: "SQL to run (e.g. SELECT). Single or multiple statements; last result is written. Do not specify schema-qualified object names such as hr.employees.",
 						},
 						"file_path": {
 							Type:        "string",
@@ -342,13 +343,13 @@ func (s *Server) handleToolsList(req *jsonRPCRequest) {
 			},
 			{
 				Name:        "query_to_text_file",
-				Description: "Execute the given SQL and write the result to a file as plain text: no header, columns tab-separated. No extra newlines between rows; only newlines in the cell data are written. CLOB columns are read in full. Use for procedure source or any query (including CLOB). file_path must be absolute. Same safety review as execute_sql (danger_keywords / optional DDL confirm) before running.",
+				Description: "Execute the given SQL and write the result to a file as plain text: no header, columns tab-separated. No extra newlines between rows; only newlines in the cell data are written. CLOB columns are read in full. Use for procedure source or any query (including CLOB). file_path must be absolute. Same safety review as execute_sql (danger_keywords / optional DDL confirm) before running. Do not specify schema-qualified object names such as hr.employees.",
 				InputSchema: inputSchema{
 					Type: "object",
 					Properties: map[string]property{
 						"sql": {
 							Type:        "string",
-							Description: "SQL to run (e.g. SELECT text FROM user_source ...). Single or multiple statements; last result is written.",
+							Description: "SQL to run (e.g. SELECT text FROM user_source ...). Single or multiple statements; last result is written. Do not specify schema-qualified object names such as hr.employees.",
 						},
 						"file_path": {
 							Type:        "string",
@@ -397,6 +398,13 @@ func (s *Server) handleToolsCall(req *jsonRPCRequest) {
 func (s *Server) tryConfirmDangerousSQL(req *jsonRPCRequest, sql, displayConnection, sourceLabel string) (*sqlanalyzer.AnalysisResult, string, bool) {
 	analysis := s.analyzer.Analyze(sql)
 	stmtType := sqlanalyzer.GetStatementType(sql)
+	if analysis.HasExplicitSchema {
+		s.sendError(req.ID, ErrCodeSchemaQualified, "Schema-qualified object names are not allowed", map[string]interface{}{
+			"code":             "SCHEMA_QUALIFIED_NOT_ALLOWED",
+			"explicit_schemas": analysis.ExplicitSchemas,
+		})
+		return nil, "", false
+	}
 	needsConfirmation := analysis.IsDangerous ||
 		(s.config.Security.RequireConfirmForDDL && analysis.IsDDL)
 	if !needsConfirmation {
