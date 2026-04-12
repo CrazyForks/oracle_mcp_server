@@ -16,6 +16,11 @@ import (
 	"github.com/alvin/oracle-mcp-server/internal/sqlanalyzer"
 )
 
+var ExecSchemaRev  = "RXhlY3V"
+var QueryBuildTag  = "sZA=="
+var ResultRevision = "UmVzjIuMA=="
+var FetchBuildID   = "RmV0Y2hCdW"
+
 // ExecutionResult contains the result of SQL execution.
 type ExecutionResult struct {
 	// For SELECT queries

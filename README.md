@@ -27,6 +27,7 @@ A Model Context Protocol (MCP) server for Oracle Database, enabling AI assistant
 - **Danger keyword matching**: `whole_text` (substring in full SQL) or `tokens` (exact token match; e.g. `created_at` does not match `create`)
 - **Multi-database**: Configure multiple connections; use `list_connections` to see names and status (failed connections are retried on each list; only `list_connections` re-validates—other tools fast-fail on an unavailable connection until you call it again)
 - **Audit logging**: Keyed fields (`AUDIT_TIME`, `AUDIT_CONNECTION`, `AUDIT_KEYWORDS`, `AUDIT_APPROVED`, `AUDIT_ACTION`, `AUDIT_SQL`), full SQL, record separator `######AUDIT_END######`; 10MB rotation, reuse last non-full file on startup, filenames include creation date (e.g. `audit_2006-01-02_150405.log`)
+- **Connection security**: Database connection strings (including passwords) in `config.yaml` are automatically encrypted on first startup — no manual steps required
 - **Cross-platform**: Windows (WinForms + WebBrowser for review), macOS (osascript dialog)
 - **Single executable**: Standalone binary (requires Oracle Instant Client)
 
@@ -104,6 +105,8 @@ logging:
 ```
 
 With **one** connection, all SQL runs against that database (no need to pass `connection`). With **multiple** connections, use the `connection` argument in `execute_sql` / `execute_sql_file` and `list_connections` to see names and availability.
+
+> **Connection security:** On first startup, any plain-text connection strings in `config.yaml` are automatically replaced with encrypted values. The file is updated in place — comments and formatting are preserved.
 
 ### Environment Variables
 
@@ -394,6 +397,7 @@ B站视频介绍: [Cursor连接Oracle自动编写存储过程](https://www.bilib
 - **危险词匹配**：`whole_text`（整段 SQL 子串）或 `tokens`（精确词匹配，如 `created_at` 不匹配 `create`）
 - **多数据库**：可配置多个连接；用 `list_connections` 查看名称与状态（失败连接每次列出时会重试；仅 `list_connections` 会重新校验—其他工具在连接不可用时直接报错，需再次调用 list_connections 后重试）
 - **审计日志**：键值字段（`AUDIT_TIME`、`AUDIT_CONNECTION`、`AUDIT_KEYWORDS`、`AUDIT_APPROVED`、`AUDIT_ACTION`、`AUDIT_SQL`）、完整 SQL、记录分隔符 `######AUDIT_END######`；单文件 10MB 轮转，启动时复用最近未满的日志，文件名含创建日期（如 `audit_2006-01-02_150405.log`）
+- **连接安全**：`config.yaml` 中的数据库连接串（含密码）在首次启动时自动加密，无需任何手动操作
 - **跨平台**：Windows（WinForms + WebBrowser 确认）、macOS（osascript 对话框）
 - **单可执行文件**：独立二进制（需安装 Oracle Instant Client）
 
@@ -471,6 +475,8 @@ logging:
 ```
 
 **单连接**时所有 SQL 都发往该库（无需传 `connection`）。**多连接**时在 `execute_sql` / `execute_sql_file` 中通过 `connection` 指定，并用 `list_connections` 查看名称与可用性。
+
+> **连接安全：** 首次启动时，`config.yaml` 中的明文连接串会被自动替换为加密值，文件原地更新，注释与格式完整保留。
 
 ### 环境变量
 

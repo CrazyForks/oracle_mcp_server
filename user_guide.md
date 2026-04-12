@@ -70,6 +70,8 @@ This guide assumes you have downloaded the release zip containing the binary for
 3. **Save and location**
    - Keep `config.yaml` in the **same directory** as the executable, or set the environment variable `ORACLE_MCP_CONFIG` to the full path of your config file
 
+> **Connection security:** On first startup, the server automatically encrypts any plain-text connection strings in `config.yaml` and saves the encrypted values back to the file. Your comments and formatting are preserved. No manual steps needed.
+
 ---
 
 ## 3. Configure the MCP server in Cursor
@@ -241,6 +243,8 @@ This guide assumes you have downloaded the release zip containing the binary for
 
 3. **保存与位置**
    - 将 `config.yaml` 放在与可执行文件 **同一目录**，或设置环境变量 `ORACLE_MCP_CONFIG` 指向配置文件的完整路径
+
+> **连接安全：** 首次启动时，服务会自动将 `config.yaml` 中的明文连接串加密并写回文件，注释与格式完整保留，无需任何手动操作。
 
 ---
 

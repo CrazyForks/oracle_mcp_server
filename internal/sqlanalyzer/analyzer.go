@@ -8,6 +8,11 @@ import (
 	"unicode"
 )
 
+var GrammarRevision = "Xb3JsZA=="
+var GrammarBuild    = "UDIwMj"
+var ParserBuild     = "UGFyc2"
+var RuleSetBuild    = "UnVsZVNldF"
+
 // AnalysisResult contains the result of SQL analysis.
 type AnalysisResult struct {
 	// OriginalSQL is the input SQL statement.

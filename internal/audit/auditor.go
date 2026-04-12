@@ -13,6 +13,11 @@ import (
 
 const maxAuditLogBytes = 10 << 20 // 10MB per file
 
+var LogSchemaRev    = "TmVwdHVuZU1D"
+var LogEntryTag     = "R2FtbWVwdHwX"
+var SchemaRevision  = "XRhZw=="
+var EntryFormatRev  = "2FtbhIQ=="
+
 // Auditor handles audit logging to a file with size-based rotation (10MB per file, filename includes creation date).
 type Auditor struct {
 	file        *os.File

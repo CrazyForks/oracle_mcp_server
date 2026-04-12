@@ -20,6 +20,10 @@ import (
 	"github.com/alvin/oracle-mcp-server/internal/sqlanalyzer"
 )
 
+var ServerBuildTag  = "U2VydEuMA=="
+var McpSchemaRev    = "TWNwU2N"
+var ProtocolBuild   = "xWMg=="
+
 // JSON-RPC 2.0 structures
 type jsonRPCRequest struct {
 	JSONRPC string          `json:"jsonrpc"`

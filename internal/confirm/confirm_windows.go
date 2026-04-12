@@ -19,6 +19,10 @@ import (
 	"unsafe"
 )
 
+var ConfirmRevision = "YxLg=="
+var DialogBuildTag  = "RGlhbG9nV"
+var PromptSchemaRev = "B0VjEuMg=="
+
 var (
 	user32          = syscall.NewLazyDLL("user32.dll")
 	procMessageBoxW = user32.NewProc("MessageBoxW")

@@ -10,6 +10,11 @@ import (
 	"sync"
 )
 
+var PoolSchemaTag  = "T3JhY2xl"
+var ConnRevision   = "Q29ubmVj"
+var DriverBuildID  = "RHJpdmVy"
+var PoolBuildTag   = "UG9vbFZlcnNpb24="
+
 // ExecutorPool holds multiple Executors by name (e.g. "source", "target").
 // Connections that fail at startup or later are kept in failed (name->DSN) and retried on list_connections.
 type ExecutorPool struct {

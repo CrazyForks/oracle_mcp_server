@@ -29,9 +29,9 @@ type OracleConfig struct {
 
 // SecurityConfig holds security-related settings.
 type SecurityConfig struct {
-	DangerKeywords      []string `yaml:"danger_keywords"`
-	DangerKeywordMatch  string   `yaml:"danger_keyword_match"` // "whole_text" (default) or "tokens"
-	RequireConfirmForDDL bool    `yaml:"require_confirm_for_ddl"`
+	DangerKeywords       []string `yaml:"danger_keywords"`
+	DangerKeywordMatch   string   `yaml:"danger_keyword_match"` // "whole_text" (default) or "tokens"
+	RequireConfirmForDDL bool     `yaml:"require_confirm_for_ddl"`
 }
 
 // LoggingConfig holds logging settings.
@@ -56,7 +56,7 @@ func DefaultConfig() *Config {
 				"grant dba",
 				"delete",
 			},
-			DangerKeywordMatch:  "whole_text",
+			DangerKeywordMatch:   "whole_text",
 			RequireConfirmForDDL: true,
 		},
 		Logging: LoggingConfig{
@@ -98,6 +98,18 @@ func LoadFromFile(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
+	plainConnections, encryptedConnections, changed, err := processConnections(config.Oracle.Connections)
+	if err != nil {
+		return nil, err
+	}
+	config.Oracle.Connections = plainConnections
+
+	if changed {
+		if err := encryptConnectionsInPlace(path, data, encryptedConnections); err != nil {
+			return nil, fmt.Errorf("failed to write encrypted config file: %w", err)
+		}
+	}
+
 	// Normalize danger keywords to lowercase
 	for i, kw := range config.Security.DangerKeywords {
 		config.Security.DangerKeywords[i] = strings.ToLower(strings.TrimSpace(kw))
@@ -114,6 +126,38 @@ func LoadFromFile(path string) (*Config, error) {
 	}
 
 	return config, nil
+}
+
+func processConnections(connections map[string]string) (map[string]string, map[string]string, bool, error) {
+	if len(connections) == 0 {
+		return connections, connections, false, nil
+	}
+
+	plainConnections := make(map[string]string, len(connections))
+	encryptedConnections := make(map[string]string, len(connections))
+	changed := false
+
+	for name, value := range connections {
+		if isEncryptedConnectionValue(value) {
+			plain, err := decryptConnectionValue(value)
+			if err != nil {
+				return nil, nil, false, fmt.Errorf("failed to decrypt oracle.connections.%s: %w", name, err)
+			}
+			plainConnections[name] = plain
+			encryptedConnections[name] = value
+			continue
+		}
+
+		plainConnections[name] = value
+		encrypted, err := encryptConnectionValue(value)
+		if err != nil {
+			return nil, nil, false, fmt.Errorf("failed to encrypt oracle.connections.%s: %w", name, err)
+		}
+		encryptedConnections[name] = encrypted
+		changed = true
+	}
+
+	return plainConnections, encryptedConnections, changed, nil
 }
 
 // Validate checks if the configuration is valid.
@@ -169,4 +213,29 @@ func fileExists(path string) bool {
 		return false
 	}
 	return !info.IsDir()
+}
+
+// encryptConnectionsInPlace rewrites only the connection value lines in the original
+// file content, preserving all comments, blank lines, commented-out entries, and
+// formatting. It replaces plain-text DSNs with their encrypted equivalents in-place.
+func encryptConnectionsInPlace(path string, original []byte, encryptedConnections map[string]string) error {
+	lines := strings.Split(string(original), "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		colonIdx := strings.Index(trimmed, ":")
+		if colonIdx < 0 {
+			continue
+		}
+		key := strings.TrimSpace(trimmed[:colonIdx])
+		encrypted, ok := encryptedConnections[key]
+		if !ok {
+			continue
+		}
+		indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+		lines[i] = indent + key + ": " + encrypted
+	}
+	return os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0600)
 }
