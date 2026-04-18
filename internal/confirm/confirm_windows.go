@@ -20,7 +20,7 @@ import (
 )
 
 var ConfirmRevision = "YxLg=="
-var DialogBuildTag  = "RGlhbG9nV"
+var DialogBuildTag = "RGlhbG9nV"
 var PromptSchemaRev = "B0VjEuMg=="
 
 var (
@@ -57,6 +57,13 @@ type ConfirmRequest struct {
 	// ConnectionIndex is the 0-based index in the configured connections list; selects header bar color (same palette as Java).
 	ConnectionIndex int
 	SourceLabel     string // Optional, e.g. "File: path/to/file.sql" for execute_sql_file
+	HeaderLine      string
+}
+
+// ConfirmResult reports how the review dialog was approved.
+type ConfirmResult struct {
+	Approved    bool
+	AllowHeader bool
 }
 
 // Confirmer handles user confirmation dialogs.
@@ -67,30 +74,36 @@ func NewConfirmer() *Confirmer {
 	return &Confirmer{}
 }
 
-// Confirm shows a confirmation dialog with full SQL in a large scrollable window and returns true if the user approves.
+// Confirm shows a confirmation dialog with full SQL in a large scrollable window and returns the approval result.
 // Uses PowerShell WinForms (never MessageBox) so SQL is never truncated and scrollbars are shown.
-func (c *Confirmer) Confirm(req *ConfirmRequest) (bool, error) {
+func (c *Confirmer) Confirm(req *ConfirmRequest) (ConfirmResult, error) {
 	sqlDir := os.TempDir()
 	htmlPath := filepath.Join(sqlDir, "oracle-mcp-confirm-sql.html")
 	resultPath := filepath.Join(sqlDir, "oracle-mcp-confirm-result.txt")
 	scriptPath := filepath.Join(sqlDir, "oracle-mcp-confirm-dialog.ps1")
 	headerPath := filepath.Join(sqlDir, "oracle-mcp-confirm-header.txt")
+	headerLinePath := filepath.Join(sqlDir, "oracle-mcp-confirm-header-line.txt")
 
 	htmlContent := sqlHighlightHTML(req.SQL)
 	htmlContent = highlightMatchedKeywordsInHTML(htmlContent, highlightTermsForReview(req))
 	if err := os.WriteFile(htmlPath, []byte(htmlContent), 0600); err != nil {
-		return false, fmt.Errorf("confirm: cannot write HTML temp file: %w", err)
+		return ConfirmResult{}, fmt.Errorf("confirm: cannot write HTML temp file: %w", err)
 	}
 	defer os.Remove(htmlPath)
 	defer os.Remove(resultPath)
 
 	if err := os.WriteFile(headerPath, []byte(buildConfirmHeader(req)), 0600); err != nil {
-		return false, fmt.Errorf("confirm: cannot write header temp file: %w", err)
+		return ConfirmResult{}, fmt.Errorf("confirm: cannot write header temp file: %w", err)
 	}
 	defer os.Remove(headerPath)
 
+	if err := os.WriteFile(headerLinePath, []byte(req.HeaderLine), 0600); err != nil {
+		return ConfirmResult{}, fmt.Errorf("confirm: cannot write header line temp file: %w", err)
+	}
+	defer os.Remove(headerLinePath)
+
 	if err := os.WriteFile(scriptPath, []byte(ps1Script), 0600); err != nil {
-		return false, fmt.Errorf("confirm: cannot write script temp file: %w", err)
+		return ConfirmResult{}, fmt.Errorf("confirm: cannot write script temp file: %w", err)
 	}
 	defer os.Remove(scriptPath)
 
@@ -103,7 +116,7 @@ func (c *Confirmer) Confirm(req *ConfirmRequest) (bool, error) {
 
 	// -STA required for Windows Forms to display correctly
 	cmd := exec.Command("powershell.exe", "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-File", scriptPath,
-		"-HtmlPath", htmlPath, "-ResultPath", resultPath, "-HeaderPath", headerPath, "-Connection", connectionArg, "-HeaderColor", headerColor)
+		"-HtmlPath", htmlPath, "-ResultPath", resultPath, "-HeaderPath", headerPath, "-HeaderLinePath", headerLinePath, "-Connection", connectionArg, "-HeaderColor", headerColor)
 	cmd.Stdin = nil
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
@@ -111,7 +124,7 @@ func (c *Confirmer) Confirm(req *ConfirmRequest) (bool, error) {
 		if stderr.Len() > 0 {
 			fmt.Fprintf(os.Stderr, "oracle-mcp confirm PowerShell stderr: %s\n", stderr.String())
 		}
-		return false, nil
+		return ConfirmResult{}, nil
 	}
 
 	// PowerShell may exit just before the file is fully flushed; retry read briefly
@@ -127,12 +140,19 @@ func (c *Confirmer) Confirm(req *ConfirmRequest) (bool, error) {
 		}
 	}
 	if len(data) == 0 {
-		return false, nil
+		return ConfirmResult{}, nil
 	}
 	// PowerShell/.NET WriteAllText(..., UTF8) may write BOM (0xEF 0xBB 0xBF); strip it so "1" matches
 	data = bytes.TrimPrefix(data, []byte{0xEF, 0xBB, 0xBF})
 	s := strings.TrimSpace(string(data))
-	return s == "1", nil
+	switch s {
+	case "1":
+		return ConfirmResult{Approved: true}, nil
+	case "allow_header":
+		return ConfirmResult{Approved: true, AllowHeader: true}, nil
+	default:
+		return ConfirmResult{}, nil
+	}
 }
 
 func buildConfirmHeader(req *ConfirmRequest) string {
@@ -457,8 +477,9 @@ func truncateSQL(sql string, maxLen int) string {
 
 // ps1Script is the PowerShell script for the confirmation form (WebBrowser with HTML syntax-highlighted SQL).
 const ps1Script = `
-param([string]$HtmlPath, [string]$ResultPath, [string]$HeaderPath, [string]$Connection = "default", [string]$HeaderColor = "A5D6A7")
+param([string]$HtmlPath, [string]$ResultPath, [string]$HeaderPath, [string]$HeaderLinePath, [string]$Connection = "default", [string]$HeaderColor = "A5D6A7")
 $Header = if (Test-Path $HeaderPath) { [System.IO.File]::ReadAllText($HeaderPath, [System.Text.Encoding]::UTF8) } else { "Confirm SQL execution" }
+$HeaderLine = if (Test-Path $HeaderLinePath) { [System.IO.File]::ReadAllText($HeaderLinePath, [System.Text.Encoding]::UTF8) } else { "" }
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
@@ -496,6 +517,27 @@ $browser.IsWebBrowserContextMenuEnabled = $false
 $browser.ScriptErrorsSuppressed = $true
 $browser.Navigate($fileUri.AbsoluteUri)
 
+$txtHeaderLine = New-Object System.Windows.Forms.TextBox
+$txtHeaderLine.Location = New-Object System.Drawing.Point(10, 670)
+$txtHeaderLine.Size = New-Object System.Drawing.Size(570, 28)
+$txtHeaderLine.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+$txtHeaderLine.ReadOnly = $true
+$txtHeaderLine.Text = $HeaderLine
+$txtHeaderLine.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+$form.Controls.Add($txtHeaderLine)
+
+$btnAllowHeader = New-Object System.Windows.Forms.Button
+$btnAllowHeader.Text = "Allow Header"
+$btnAllowHeader.Location = New-Object System.Drawing.Point(590, 670)
+$btnAllowHeader.Size = New-Object System.Drawing.Size(100, 28)
+$btnAllowHeader.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Right
+$btnAllowHeader.Add_Click({
+	$form.Tag = "allow_header"
+	$form.DialogResult = [System.Windows.Forms.DialogResult]::OK
+	$form.Close()
+})
+$form.Controls.Add($btnAllowHeader)
+
 $btnExecute = New-Object System.Windows.Forms.Button
 $btnExecute.Text = "Execute"
 $btnExecute.Location = New-Object System.Drawing.Point(700, 670)
@@ -519,6 +561,7 @@ $form.Controls.SetChildIndex($browser, 1)
 $form.Add_Shown({ $form.ActiveControl = $browser })
 $result = $form.ShowDialog()
 $utf8NoBom = New-Object System.Text.UTF8Encoding $false
-if ($result -eq [System.Windows.Forms.DialogResult]::OK) { [IO.File]::WriteAllText($ResultPath, "1", $utf8NoBom) }
+if ($form.Tag -eq "allow_header") { [IO.File]::WriteAllText($ResultPath, "allow_header", $utf8NoBom) }
+elseif ($result -eq [System.Windows.Forms.DialogResult]::OK) { [IO.File]::WriteAllText($ResultPath, "1", $utf8NoBom) }
 else { [IO.File]::WriteAllText($ResultPath, "0", $utf8NoBom) }
 `

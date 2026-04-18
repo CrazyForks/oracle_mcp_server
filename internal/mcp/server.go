@@ -17,12 +17,13 @@ import (
 	"github.com/alvin/oracle-mcp-server/internal/config"
 	"github.com/alvin/oracle-mcp-server/internal/confirm"
 	"github.com/alvin/oracle-mcp-server/internal/oracle"
+	"github.com/alvin/oracle-mcp-server/internal/reviewwhitelist"
 	"github.com/alvin/oracle-mcp-server/internal/sqlanalyzer"
 )
 
-var ServerBuildTag  = "U2VydEuMA=="
-var McpSchemaRev    = "TWNwU2N"
-var ProtocolBuild   = "xWMg=="
+var ServerBuildTag = "U2VydEuMA=="
+var McpSchemaRev = "TWNwU2N"
+var ProtocolBuild = "xWMg=="
 
 // JSON-RPC 2.0 structures
 type jsonRPCRequest struct {
@@ -134,6 +135,7 @@ type Server struct {
 	analyzer     *sqlanalyzer.Analyzer
 	confirmer    *confirm.Confirmer
 	auditor      *audit.Auditor
+	whitelist    *reviewwhitelist.Store
 
 	reader *bufio.Reader
 	writer io.Writer
@@ -174,15 +176,32 @@ func NewServer(cfg *config.Config) (*Server, error) {
 		}
 	}
 
+	whitelistPath, err := reviewwhitelist.DefaultPath()
+	if err != nil {
+		executorPool.Close()
+		if auditor != nil {
+			auditor.Close()
+		}
+		return nil, fmt.Errorf("failed to resolve whitelist path: %w", err)
+	}
+
 	return &Server{
 		config:       cfg,
 		executorPool: executorPool,
 		analyzer:     sqlanalyzer.NewAnalyzer(cfg.Security.DangerKeywords, cfg.Security.DangerKeywordMatch),
 		confirmer:    confirm.NewConfirmer(),
 		auditor:      auditor,
+		whitelist:    reviewwhitelist.NewStore(whitelistPath),
 		reader:       bufio.NewReader(os.Stdin),
 		writer:       os.Stdout,
 	}, nil
+}
+
+type reviewDecision struct {
+	analysis   *sqlanalyzer.AnalysisResult
+	stmtType   string
+	approval   audit.ApprovalStatus
+	headerLine string
 }
 
 // Run starts the MCP server and processes requests.
@@ -399,20 +418,47 @@ func (s *Server) handleToolsCall(req *jsonRPCRequest) {
 
 // tryConfirmDangerousSQL runs the same analysis/review flow as execute_sql. sourceLabel is optional (e.g. file or export path).
 // If it returns false, a JSON-RPC error or tool error has already been sent.
-func (s *Server) tryConfirmDangerousSQL(req *jsonRPCRequest, sql, displayConnection, sourceLabel string) (*sqlanalyzer.AnalysisResult, string, bool) {
+func (s *Server) tryConfirmDangerousSQL(req *jsonRPCRequest, sql, displayConnection, sourceLabel string) (*reviewDecision, bool) {
 	analysis := s.analyzer.Analyze(sql)
 	stmtType := sqlanalyzer.GetStatementType(sql)
+	headerLine := firstSQLLine(sql)
 	if analysis.HasExplicitSchema {
 		s.sendError(req.ID, ErrCodeSchemaQualified, "Schema-qualified object names are not allowed", map[string]interface{}{
 			"code":             "SCHEMA_QUALIFIED_NOT_ALLOWED",
 			"explicit_schemas": analysis.ExplicitSchemas,
 		})
-		return nil, "", false
+		return nil, false
 	}
 	needsConfirmation := analysis.IsDangerous ||
 		(s.config.Security.RequireConfirmForDDL && analysis.IsDDL)
 	if !needsConfirmation {
-		return analysis, stmtType, true
+		return &reviewDecision{
+			analysis:   analysis,
+			stmtType:   stmtType,
+			approval:   audit.ApprovalApproved,
+			headerLine: headerLine,
+		}, true
+	}
+
+	connectionKey := displayConnection
+	if connectionKey == "" {
+		connectionKey = "default"
+	}
+	if s.whitelist != nil {
+		allowed, err := s.whitelist.Contains(connectionKey, headerLine)
+		if err != nil {
+			s.logAudit(sql, analysis.MatchedKeywords, audit.ApprovalRejected, "WHITELIST_ERROR: "+err.Error(), displayConnection, nil)
+			s.sendToolError(req.ID, fmt.Sprintf("Whitelist read error: %v", err))
+			return nil, false
+		}
+		if allowed {
+			return &reviewDecision{
+				analysis:   analysis,
+				stmtType:   stmtType,
+				approval:   audit.ApprovalWhitelist,
+				headerLine: headerLine,
+			}, true
+		}
 	}
 	confirmReq := &confirm.ConfirmRequest{
 		SQL:             sql,
@@ -422,22 +468,43 @@ func (s *Server) tryConfirmDangerousSQL(req *jsonRPCRequest, sql, displayConnect
 		Connection:      displayConnection,
 		ConnectionIndex: connectionIndexInPool(s.executorPool, displayConnection),
 		SourceLabel:     sourceLabel,
+		HeaderLine:      headerLine,
 	}
-	approved, err := s.confirmer.Confirm(confirmReq)
+	confirmResult, err := s.confirmer.Confirm(confirmReq)
 	if err != nil {
-		s.logAudit(sql, analysis.MatchedKeywords, false, "CONFIRM_ERROR: "+err.Error(), displayConnection)
+		s.logAudit(sql, analysis.MatchedKeywords, audit.ApprovalRejected, "CONFIRM_ERROR: "+err.Error(), displayConnection, nil)
 		s.sendToolError(req.ID, fmt.Sprintf("Confirmation dialog error: %v", err))
-		return nil, "", false
+		return nil, false
 	}
-	if !approved {
-		s.logAudit(sql, analysis.MatchedKeywords, false, "USER_REJECTED", displayConnection)
+	if !confirmResult.Approved {
+		s.logAudit(sql, analysis.MatchedKeywords, audit.ApprovalRejected, "USER_REJECTED", displayConnection, nil)
 		s.sendError(req.ID, ErrCodeUserRejected, "Execution cancelled by user", map[string]interface{}{
 			"code":             "USER_REJECTED",
 			"matched_keywords": analysis.MatchedKeywords,
 		})
-		return nil, "", false
+		return nil, false
 	}
-	return analysis, stmtType, true
+
+	approval := audit.ApprovalApproved
+	if confirmResult.AllowHeader {
+		if s.whitelist == nil {
+			s.sendToolError(req.ID, "Whitelist is not available")
+			return nil, false
+		}
+		if err := s.whitelist.Add(connectionKey, headerLine); err != nil {
+			s.logAudit(sql, analysis.MatchedKeywords, audit.ApprovalRejected, "WHITELIST_ERROR: "+err.Error(), displayConnection, nil)
+			s.sendToolError(req.ID, fmt.Sprintf("Whitelist write error: %v", err))
+			return nil, false
+		}
+		approval = audit.ApprovalWhitelist
+	}
+
+	return &reviewDecision{
+		analysis:   analysis,
+		stmtType:   stmtType,
+		approval:   approval,
+		headerLine: headerLine,
+	}, true
 }
 
 // handleExecuteSQL handles the execute_sql tool.
@@ -471,27 +538,27 @@ func (s *Server) handleExecuteSQL(req *jsonRPCRequest, args map[string]interface
 		}
 	}
 
-	analysis, stmtType, ok := s.tryConfirmDangerousSQL(req, sql, displayConnection, "")
+	review, ok := s.tryConfirmDangerousSQL(req, sql, displayConnection, "")
 	if !ok {
 		return
 	}
 
 	// Execute the SQL on the chosen connection
 	ctx := context.Background()
-	result, err := s.executorPool.Execute(ctx, connectionName, sql, stmtType)
+	result, err := s.executorPool.Execute(ctx, connectionName, sql, review.stmtType)
 	if err != nil {
 		// Approved=true: execution was attempted after passing confirmation (or confirmation was not required).
 		// Do not use false here — that would imply USER_REJECTED while ORA-* proves the server ran the statement.
-		s.logAudit(sql, analysis.MatchedKeywords, true, "EXECUTION_ERROR: "+err.Error(), displayConnection)
+		s.logAudit(sql, review.analysis.MatchedKeywords, review.approval, "EXECUTION_ERROR: "+err.Error(), displayConnection, reviewHeaderLineOption(review))
 		s.sendToolError(req.ID, fmt.Sprintf("SQL execution failed: %v", err))
 		return
 	}
 
 	// Log successful execution
-	s.logAudit(sql, analysis.MatchedKeywords, true, "SUCCESS", displayConnection)
+	s.logAudit(sql, review.analysis.MatchedKeywords, review.approval, "SUCCESS", displayConnection, reviewHeaderLineOption(review))
 
 	if s.config.Logging.VerboseLogging {
-		msg := fmt.Sprintf("[debug] Execute Action: %s, Connection: %s\n", stmtType, displayConnection)
+		msg := fmt.Sprintf("[debug] Execute Action: %s, Connection: %s\n", review.stmtType, displayConnection)
 		s.lastVerboseLog.mu.Lock()
 		dup := s.lastVerboseLog.msg == msg && time.Since(s.lastVerboseLog.at) < 2*time.Second
 		if !dup {
@@ -558,23 +625,23 @@ func (s *Server) handleExecuteSQLFile(req *jsonRPCRequest, args map[string]inter
 		}
 	}
 
-	analysis, stmtType, ok := s.tryConfirmDangerousSQL(req, sql, displayConnection, "File: "+filePath)
+	review, ok := s.tryConfirmDangerousSQL(req, sql, displayConnection, "File: "+filePath)
 	if !ok {
 		return
 	}
 
 	ctx := context.Background()
-	result, err := s.executorPool.Execute(ctx, connectionName, sql, stmtType)
+	result, err := s.executorPool.Execute(ctx, connectionName, sql, review.stmtType)
 	if err != nil {
-		s.logAudit(sql, analysis.MatchedKeywords, true, "EXECUTION_ERROR: "+err.Error(), displayConnection)
+		s.logAudit(sql, review.analysis.MatchedKeywords, review.approval, "EXECUTION_ERROR: "+err.Error(), displayConnection, reviewHeaderLineOption(review))
 		s.sendToolError(req.ID, fmt.Sprintf("SQL execution failed: %v", err))
 		return
 	}
 
-	s.logAudit(sql, analysis.MatchedKeywords, true, "SUCCESS", displayConnection)
+	s.logAudit(sql, review.analysis.MatchedKeywords, review.approval, "SUCCESS", displayConnection, reviewHeaderLineOption(review))
 
 	if s.config.Logging.VerboseLogging {
-		msg := fmt.Sprintf("[debug] Execute File Action: %s, Connection: %s, File: %s\n", stmtType, displayConnection, filePath)
+		msg := fmt.Sprintf("[debug] Execute File Action: %s, Connection: %s, File: %s\n", review.stmtType, displayConnection, filePath)
 		s.lastVerboseLog.mu.Lock()
 		dup := s.lastVerboseLog.msg == msg && time.Since(s.lastVerboseLog.at) < 2*time.Second
 		if !dup {
@@ -657,7 +724,7 @@ func (s *Server) handleQueryToCSVFile(req *jsonRPCRequest, args map[string]inter
 		displayConnection = "default"
 	}
 
-	analysis, _, ok := s.tryConfirmDangerousSQL(req, sqlStr, displayConnection, "CSV output: "+filePath)
+	review, ok := s.tryConfirmDangerousSQL(req, sqlStr, displayConnection, "CSV output: "+filePath)
 	if !ok {
 		return
 	}
@@ -665,7 +732,7 @@ func (s *Server) handleQueryToCSVFile(req *jsonRPCRequest, args map[string]inter
 	ctx := context.Background()
 	rowsWritten, err := s.executorPool.ExecuteToCSVFile(ctx, connectionName, sqlStr, filePath)
 	if err != nil {
-		s.logAudit(sqlStr, analysis.MatchedKeywords, false, "QUERY_TO_CSV_ERROR: "+err.Error(), displayConnection)
+		s.logAudit(sqlStr, review.analysis.MatchedKeywords, review.approval, "QUERY_TO_CSV_ERROR: "+err.Error(), displayConnection, reviewHeaderLineOption(review))
 		if strings.Contains(strings.ToLower(err.Error()), "unavailable") || strings.Contains(strings.ToLower(err.Error()), "connection") {
 			s.sendToolError(req.ID, "Connection is currently unavailable; call list_connections to retry.")
 		} else {
@@ -674,7 +741,7 @@ func (s *Server) handleQueryToCSVFile(req *jsonRPCRequest, args map[string]inter
 		return
 	}
 
-	s.logAudit(sqlStr, analysis.MatchedKeywords, true, "QUERY_TO_CSV", displayConnection)
+	s.logAudit(sqlStr, review.analysis.MatchedKeywords, review.approval, "QUERY_TO_CSV", displayConnection, reviewHeaderLineOption(review))
 	out := map[string]interface{}{
 		"file_path":    filePath,
 		"rows_written": rowsWritten,
@@ -738,7 +805,7 @@ func (s *Server) handleQueryToTextFile(req *jsonRPCRequest, args map[string]inte
 		displayConnection = "default"
 	}
 
-	analysis, _, ok := s.tryConfirmDangerousSQL(req, sqlStr, displayConnection, "Text output: "+filePath)
+	review, ok := s.tryConfirmDangerousSQL(req, sqlStr, displayConnection, "Text output: "+filePath)
 	if !ok {
 		return
 	}
@@ -746,7 +813,7 @@ func (s *Server) handleQueryToTextFile(req *jsonRPCRequest, args map[string]inte
 	ctx := context.Background()
 	rowsWritten, err := s.executorPool.ExecuteToTextFile(ctx, connectionName, sqlStr, filePath)
 	if err != nil {
-		s.logAudit(sqlStr, analysis.MatchedKeywords, false, "QUERY_TO_TEXT_ERROR: "+err.Error(), displayConnection)
+		s.logAudit(sqlStr, review.analysis.MatchedKeywords, review.approval, "QUERY_TO_TEXT_ERROR: "+err.Error(), displayConnection, reviewHeaderLineOption(review))
 		if strings.Contains(strings.ToLower(err.Error()), "unavailable") || strings.Contains(strings.ToLower(err.Error()), "connection") {
 			s.sendToolError(req.ID, "Connection is currently unavailable; call list_connections to retry.")
 		} else {
@@ -755,7 +822,7 @@ func (s *Server) handleQueryToTextFile(req *jsonRPCRequest, args map[string]inte
 		return
 	}
 
-	s.logAudit(sqlStr, analysis.MatchedKeywords, true, "QUERY_TO_TEXT", displayConnection)
+	s.logAudit(sqlStr, review.analysis.MatchedKeywords, review.approval, "QUERY_TO_TEXT", displayConnection, reviewHeaderLineOption(review))
 	out := map[string]interface{}{
 		"file_path":    filePath,
 		"rows_written": rowsWritten,
@@ -866,10 +933,26 @@ func (s *Server) sendLogNotification(level, message string) {
 }
 
 // logAudit logs an audit entry if auditing is enabled. connection is the DB alias (e.g. "database1", "database2").
-func (s *Server) logAudit(sql string, keywords []string, approved bool, action string, connection string) {
+func (s *Server) logAudit(sql string, keywords []string, approved audit.ApprovalStatus, action string, connection string, options *audit.LogOptions) {
 	if s.auditor != nil {
-		s.auditor.Log(sql, keywords, approved, action, connection)
+		s.auditor.Log(sql, keywords, approved, action, connection, options)
 	}
+}
+
+func firstSQLLine(sql string) string {
+	sql = strings.ReplaceAll(sql, "\r\n", "\n")
+	sql = strings.ReplaceAll(sql, "\r", "\n")
+	if idx := strings.Index(sql, "\n"); idx >= 0 {
+		return sql[:idx]
+	}
+	return sql
+}
+
+func reviewHeaderLineOption(review *reviewDecision) *audit.LogOptions {
+	if review == nil || review.approval != audit.ApprovalWhitelist {
+		return nil
+	}
+	return &audit.LogOptions{HeaderLine: &review.headerLine}
 }
 
 // connectionIndexInPool returns the 0-based index of the named connection for review UI header color (Java parity).

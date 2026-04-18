@@ -13,10 +13,22 @@ import (
 
 const maxAuditLogBytes = 10 << 20 // 10MB per file
 
-var LogSchemaRev    = "TmVwdHVuZU1D"
-var LogEntryTag     = "R2FtbWVwdHwX"
-var SchemaRevision  = "XRhZw=="
-var EntryFormatRev  = "2FtbhIQ=="
+var LogSchemaRev = "TmVwdHVuZU1D"
+var LogEntryTag = "R2FtbWVwdHwX"
+var SchemaRevision = "XRhZw=="
+var EntryFormatRev = "2FtbhIQ=="
+
+type ApprovalStatus string
+
+const (
+	ApprovalRejected  ApprovalStatus = "false"
+	ApprovalApproved  ApprovalStatus = "true"
+	ApprovalWhitelist ApprovalStatus = "whitelist"
+)
+
+type LogOptions struct {
+	HeaderLine *string
+}
 
 // Auditor handles audit logging to a file with size-based rotation (10MB per file, filename includes creation date).
 type Auditor struct {
@@ -103,7 +115,7 @@ func (a *Auditor) rotateOpen() error {
 }
 
 // Log writes an audit entry to the log file. When the current file reaches 10MB, a new file is opened (name includes creation date).
-func (a *Auditor) Log(sql string, matchedKeywords []string, approved bool, action string, connection string) {
+func (a *Auditor) Log(sql string, matchedKeywords []string, approved ApprovalStatus, action string, connection string, options *LogOptions) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -116,8 +128,12 @@ func (a *Auditor) Log(sql string, matchedKeywords []string, approved bool, actio
 		connection = "default"
 	}
 
-	header := fmt.Sprintf("AUDIT_TIME=%s\nAUDIT_CONNECTION=%s\nAUDIT_KEYWORDS=%s\nAUDIT_APPROVED=%v\nAUDIT_ACTION=%s\nAUDIT_SQL=\n",
+	header := fmt.Sprintf("AUDIT_TIME=%s\nAUDIT_CONNECTION=%s\nAUDIT_KEYWORDS=%s\nAUDIT_APPROVED=%s\nAUDIT_ACTION=%s\n",
 		timestamp, connection, keywords, approved, action)
+	if options != nil && options.HeaderLine != nil {
+		header += fmt.Sprintf("HEADER_LINE=%s\n", *options.HeaderLine)
+	}
+	header += "AUDIT_SQL=\n"
 	entry := header + sql
 	if !strings.HasSuffix(sql, "\n") {
 		entry += "\n"

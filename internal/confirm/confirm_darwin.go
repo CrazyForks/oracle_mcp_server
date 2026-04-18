@@ -20,6 +20,13 @@ type ConfirmRequest struct {
 	Connection                  string
 	ConnectionIndex             int
 	SourceLabel                 string
+	HeaderLine                  string
+}
+
+// ConfirmResult reports how the review dialog was approved.
+type ConfirmResult struct {
+	Approved    bool
+	AllowHeader bool
 }
 
 // Confirmer handles user confirmation dialogs on macOS.
@@ -30,8 +37,8 @@ func NewConfirmer() *Confirmer {
 	return &Confirmer{}
 }
 
-// Confirm shows a confirmation dialog using osascript and returns true if the user approves.
-func (c *Confirmer) Confirm(req *ConfirmRequest) (bool, error) {
+// Confirm shows a confirmation dialog using osascript and returns the approval result.
+func (c *Confirmer) Confirm(req *ConfirmRequest) (ConfirmResult, error) {
 	title := "Dangerous SQL Detected"
 	if req.Connection != "" {
 		title = "Confirm SQL — " + req.Connection
@@ -50,14 +57,14 @@ func (c *Confirmer) Confirm(req *ConfirmRequest) (bool, error) {
 		// osascript returns error when user clicks Cancel
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			if exitErr.ExitCode() == 1 {
-				return false, nil // User cancelled
+				return ConfirmResult{}, nil // User cancelled
 			}
 		}
-		return false, fmt.Errorf("dialog error: %w", err)
+		return ConfirmResult{}, fmt.Errorf("dialog error: %w", err)
 	}
 
 	// Check if user clicked Execute
-	return strings.Contains(string(output), "Execute"), nil
+	return ConfirmResult{Approved: strings.Contains(string(output), "Execute")}, nil
 }
 
 // buildConfirmMessage constructs the message to display in the dialog (full SQL, no truncation).
