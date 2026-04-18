@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
@@ -33,6 +34,11 @@ func DefaultPath() (string, error) {
 		return "", fmt.Errorf("resolve executable path: %w", err)
 	}
 	return filepath.Join(filepath.Dir(exePath), "whitelist.json"), nil
+}
+
+// Path returns the underlying whitelist.json path.
+func (s *Store) Path() string {
+	return s.path
 }
 
 // ContainsHeadLine reports whether the exact connection + head_line pair already exists.
@@ -93,6 +99,28 @@ func (s *Store) AddKeyword(connection, keyword string) error {
 	}
 	entry.Keyword = append(entry.Keyword, keyword)
 	return s.saveLocked(entries)
+}
+
+// ContainsKeywordCI reports whether the exact keyword exists for the given connection, case-insensitively.
+func (s *Store) ContainsKeywordCI(connection, keyword string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entries, err := s.loadLocked()
+	if err != nil {
+		return false, err
+	}
+	for _, entry := range entries {
+		if entry.Connection != connection {
+			continue
+		}
+		for _, existing := range entry.Keyword {
+			if strings.EqualFold(existing, keyword) {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 func (s *Store) loadLocked() ([]Entry, error) {

@@ -55,16 +55,17 @@ type ConfirmRequest struct {
 	IsDDL                       bool
 	Connection                  string // Database alias from config (e.g. "database1", "database2") for title/display
 	// ConnectionIndex is the 0-based index in the configured connections list; selects header bar color (same palette as Java).
-	ConnectionIndex int
-	SourceLabel     string // Optional, e.g. "File: path/to/file.sql" for execute_sql_file
+	ConnectionIndex      int
+	SourceLabel          string // Optional, e.g. "File: path/to/file.sql" for execute_sql_file
+	WhitelistPath        string
+	WhitelistConnection  string
+	ReviewTriggerDetails []string
 }
 
 // ConfirmResult reports how the review dialog was approved.
 type ConfirmResult struct {
-	Approved     bool
-	AllowHeader  bool
-	AllowKeyword bool
-	Keyword      string
+	Approved    bool
+	AllowHeader bool
 }
 
 // Confirmer handles user confirmation dialogs.
@@ -83,7 +84,6 @@ func (c *Confirmer) Confirm(req *ConfirmRequest) (ConfirmResult, error) {
 	resultPath := filepath.Join(sqlDir, "oracle-mcp-confirm-result.txt")
 	scriptPath := filepath.Join(sqlDir, "oracle-mcp-confirm-dialog.ps1")
 	headerPath := filepath.Join(sqlDir, "oracle-mcp-confirm-header.txt")
-	keywordPath := filepath.Join(sqlDir, "oracle-mcp-confirm-keyword.txt")
 
 	htmlContent := sqlHighlightHTML(req.SQL)
 	htmlContent = highlightMatchedKeywordsInHTML(htmlContent, highlightTermsForReview(req))
@@ -97,8 +97,6 @@ func (c *Confirmer) Confirm(req *ConfirmRequest) (ConfirmResult, error) {
 		return ConfirmResult{}, fmt.Errorf("confirm: cannot write header temp file: %w", err)
 	}
 	defer os.Remove(headerPath)
-
-	defer os.Remove(keywordPath)
 
 	if err := os.WriteFile(scriptPath, []byte(ps1Script), 0600); err != nil {
 		return ConfirmResult{}, fmt.Errorf("confirm: cannot write script temp file: %w", err)
@@ -114,7 +112,7 @@ func (c *Confirmer) Confirm(req *ConfirmRequest) (ConfirmResult, error) {
 
 	// -STA required for Windows Forms to display correctly
 	cmd := exec.Command("powershell.exe", "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-File", scriptPath,
-		"-HtmlPath", htmlPath, "-ResultPath", resultPath, "-HeaderPath", headerPath, "-KeywordPath", keywordPath, "-Connection", connectionArg, "-HeaderColor", headerColor)
+		"-HtmlPath", htmlPath, "-ResultPath", resultPath, "-HeaderPath", headerPath, "-WhitelistPath", req.WhitelistPath, "-WhitelistConnection", req.WhitelistConnection, "-Connection", connectionArg, "-HeaderColor", headerColor)
 	cmd.Stdin = nil
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
@@ -146,13 +144,6 @@ func (c *Confirmer) Confirm(req *ConfirmRequest) (ConfirmResult, error) {
 	switch s {
 	case "1":
 		return ConfirmResult{Approved: true}, nil
-	case "allow_keyword":
-		keywordData, err := os.ReadFile(keywordPath)
-		if err != nil && !os.IsNotExist(err) {
-			return ConfirmResult{}, fmt.Errorf("confirm: cannot read keyword temp file: %w", err)
-		}
-		keyword := strings.TrimSpace(string(bytes.TrimPrefix(keywordData, []byte{0xEF, 0xBB, 0xBF})))
-		return ConfirmResult{Approved: true, AllowKeyword: true, Keyword: keyword}, nil
 	case "allow_header":
 		return ConfirmResult{Approved: true, AllowHeader: true}, nil
 	default:
@@ -179,6 +170,12 @@ func buildConfirmHeader(req *ConfirmRequest) string {
 	var out string
 	if len(line1) > 0 {
 		out = strings.Join(line1, "    |    ")
+	}
+	if len(req.ReviewTriggerDetails) > 0 {
+		if out != "" {
+			out += "\n"
+		}
+		out += "Review triggers: " + strings.Join(req.ReviewTriggerDetails, "    |    ")
 	}
 	if req.SourceLabel != "" {
 		if out != "" {
@@ -482,10 +479,78 @@ func truncateSQL(sql string, maxLen int) string {
 
 // ps1Script is the PowerShell script for the confirmation form (WebBrowser with HTML syntax-highlighted SQL).
 const ps1Script = `
-param([string]$HtmlPath, [string]$ResultPath, [string]$HeaderPath, [string]$KeywordPath, [string]$Connection = "default", [string]$HeaderColor = "A5D6A7")
+param([string]$HtmlPath, [string]$ResultPath, [string]$HeaderPath, [string]$WhitelistPath, [string]$WhitelistConnection, [string]$Connection = "default", [string]$HeaderColor = "A5D6A7")
 $Header = if (Test-Path $HeaderPath) { [System.IO.File]::ReadAllText($HeaderPath, [System.Text.Encoding]::UTF8) } else { "Confirm SQL execution" }
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
+
+function Normalize-WhitelistEntry($entry) {
+	$headLines = @()
+	if ($null -ne $entry.PSObject.Properties['head_line']) {
+		foreach ($value in @($entry.'head_line')) {
+			$headLines += [string]$value
+		}
+	} elseif ($null -ne $entry.PSObject.Properties['header_line']) {
+		$headLines += [string]$entry.'header_line'
+	}
+
+	$keywords = @()
+	if ($null -ne $entry.PSObject.Properties['keyword:']) {
+		foreach ($value in @($entry.'keyword:')) {
+			$keywords += [string]$value
+		}
+	}
+
+	return [ordered]@{
+		connection = [string]$entry.connection
+		head_line  = @($headLines)
+		'keyword:' = @($keywords)
+	}
+}
+
+function Save-WhitelistKeyword([string]$path, [string]$connectionName, [string]$keyword) {
+	$items = @()
+	if (-not [string]::IsNullOrWhiteSpace($path) -and (Test-Path $path)) {
+		$raw = [System.IO.File]::ReadAllText($path, [System.Text.Encoding]::UTF8).Trim()
+		if ($raw -ne '') {
+			$parsed = ConvertFrom-Json -InputObject $raw
+			foreach ($item in @($parsed)) {
+				$items += ,(Normalize-WhitelistEntry $item)
+			}
+		}
+	}
+
+	$entry = $null
+	foreach ($item in $items) {
+		if ([string]::Equals([string]$item.connection, $connectionName, [System.StringComparison]::Ordinal)) {
+			$entry = $item
+			break
+		}
+	}
+	if ($null -eq $entry) {
+		$entry = [ordered]@{
+			connection = $connectionName
+			head_line  = @()
+			'keyword:' = @()
+		}
+		$items += ,$entry
+	}
+
+	$exists = $false
+	foreach ($existing in @($entry.'keyword:')) {
+		if ([string]::Equals([string]$existing, $keyword, [System.StringComparison]::OrdinalIgnoreCase)) {
+			$exists = $true
+			break
+		}
+	}
+	if (-not $exists) {
+		$entry.'keyword:' += $keyword
+	}
+
+	$json = $items | ConvertTo-Json -Depth 5
+	$utf8NoBom = New-Object System.Text.UTF8Encoding $false
+	[System.IO.File]::WriteAllText($path, $json + [Environment]::NewLine, $utf8NoBom)
+}
 
 $fileUri = [Uri]::new("file:///" + $HtmlPath.Replace('\', '/').Replace(' ', '%20'))
 $form = New-Object System.Windows.Forms.Form
@@ -538,9 +603,17 @@ $btnAllowKeyword.Add_Click({
 		[System.Windows.Forms.MessageBox]::Show("Please enter a keyword first.", "Allow Keyword", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
 		return
 	}
-	$form.Tag = "allow_keyword"
-	$form.DialogResult = [System.Windows.Forms.DialogResult]::OK
-	$form.Close()
+	if ([string]::IsNullOrWhiteSpace($WhitelistPath)) {
+		[System.Windows.Forms.MessageBox]::Show("Whitelist path is unavailable.", "Allow Keyword", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+		return
+	}
+	try {
+		Save-WhitelistKeyword -path $WhitelistPath -connectionName $WhitelistConnection -keyword $txtKeyword.Text.Trim()
+		[System.Windows.Forms.MessageBox]::Show("Keyword added successfully.", "Allow Keyword", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
+		$txtKeyword.Clear()
+	} catch {
+		[System.Windows.Forms.MessageBox]::Show("Failed to update whitelist.json: " + $_.Exception.Message, "Allow Keyword", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
+	}
 })
 $form.Controls.Add($btnAllowKeyword)
 
@@ -579,11 +652,7 @@ $form.Controls.SetChildIndex($browser, 1)
 $form.Add_Shown({ $form.ActiveControl = $browser })
 $result = $form.ShowDialog()
 $utf8NoBom = New-Object System.Text.UTF8Encoding $false
-if ($form.Tag -eq "allow_keyword") {
-	[IO.File]::WriteAllText($KeywordPath, $txtKeyword.Text.Trim(), $utf8NoBom)
-	[IO.File]::WriteAllText($ResultPath, "allow_keyword", $utf8NoBom)
-}
-elseif ($form.Tag -eq "allow_header") { [IO.File]::WriteAllText($ResultPath, "allow_header", $utf8NoBom) }
+if ($form.Tag -eq "allow_header") { [IO.File]::WriteAllText($ResultPath, "allow_header", $utf8NoBom) }
 elseif ($result -eq [System.Windows.Forms.DialogResult]::OK) { [IO.File]::WriteAllText($ResultPath, "1", $utf8NoBom) }
 else { [IO.File]::WriteAllText($ResultPath, "0", $utf8NoBom) }
 `

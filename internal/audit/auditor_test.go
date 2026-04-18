@@ -19,7 +19,8 @@ func TestAuditorLogWhitelistApproval(t *testing.T) {
 
 	headerLine := "create or replace procedure demo"
 	auditor.Log("select 1 from dual", []string{"create"}, ApprovalWhitelist, "SUCCESS", "play", &LogOptions{
-		HeaderLine: &headerLine,
+		HeaderLine:       &headerLine,
+		ExpandedKeywords: []string{"created_at"},
 	})
 
 	matches, err := filepath.Glob(filepath.Join(filepath.Dir(logPath), "audit_*.log"))
@@ -38,6 +39,7 @@ func TestAuditorLogWhitelistApproval(t *testing.T) {
 	for _, want := range []string{
 		"AUDIT_APPROVED=whitelist",
 		"HEADER_LINE=create or replace procedure demo",
+		"EXPANDED_KEYWORDS=created_at",
 		"AUDIT_CONNECTION=play",
 	} {
 		if !strings.Contains(content, want) {

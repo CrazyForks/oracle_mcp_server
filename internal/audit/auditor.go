@@ -27,7 +27,8 @@ const (
 )
 
 type LogOptions struct {
-	HeaderLine *string
+	HeaderLine       *string
+	ExpandedKeywords []string
 }
 
 // Auditor handles audit logging to a file with size-based rotation (10MB per file, filename includes creation date).
@@ -132,6 +133,9 @@ func (a *Auditor) Log(sql string, matchedKeywords []string, approved ApprovalSta
 		timestamp, connection, keywords, approved, action)
 	if options != nil && options.HeaderLine != nil {
 		header += fmt.Sprintf("HEADER_LINE=%s\n", *options.HeaderLine)
+	}
+	if options != nil && len(options.ExpandedKeywords) > 0 {
+		header += fmt.Sprintf("EXPANDED_KEYWORDS=%s\n", strings.Join(options.ExpandedKeywords, ","))
 	}
 	header += "AUDIT_SQL=\n"
 	entry := header + sql

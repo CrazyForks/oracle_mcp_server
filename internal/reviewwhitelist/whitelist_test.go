@@ -29,6 +29,13 @@ func TestStoreAddAndContainsHeadLine(t *testing.T) {
 	if err := store.AddKeyword("play", "created_at"); err != nil {
 		t.Fatalf("AddKeyword returned error: %v", err)
 	}
+	found, err = store.ContainsKeywordCI("play", "CREATED_AT")
+	if err != nil {
+		t.Fatalf("ContainsKeywordCI returned error: %v", err)
+	}
+	if !found {
+		t.Fatal("ContainsKeywordCI did not match case-insensitively")
+	}
 
 	found, err = store.ContainsHeadLine("play", "create or replace procedure demo")
 	if err != nil {
@@ -77,6 +84,13 @@ func TestStoreLoadsLegacyHeaderLineFormat(t *testing.T) {
 	if err := store.AddKeyword("play", "created_at"); err != nil {
 		t.Fatalf("AddKeyword returned error: %v", err)
 	}
+	found, err = store.ContainsKeywordCI("play", "CREATED_AT")
+	if err != nil {
+		t.Fatalf("ContainsKeywordCI returned error: %v", err)
+	}
+	if !found {
+		t.Fatal("ContainsKeywordCI did not match migrated content case-insensitively")
+	}
 
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -85,5 +99,23 @@ func TestStoreLoadsLegacyHeaderLineFormat(t *testing.T) {
 	want := "[\n  {\n    \"connection\": \"play\",\n    \"head_line\": [\n      \"CREATE OR REPLACE PROCEDURE al_test IS\"\n    ],\n    \"keyword:\": [\n      \"created_at\"\n    ]\n  }\n]\n"
 	if string(data) != want {
 		t.Fatalf("unexpected migrated whitelist content:\n%s", string(data))
+	}
+}
+
+func TestContainsKeywordCIHonorsConnection(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "whitelist.json")
+	store := NewStore(path)
+	if err := store.AddKeyword("play", "created_at"); err != nil {
+		t.Fatalf("AddKeyword returned error: %v", err)
+	}
+
+	found, err := store.ContainsKeywordCI("test", "created_at")
+	if err != nil {
+		t.Fatalf("ContainsKeywordCI returned error: %v", err)
+	}
+	if found {
+		t.Fatal("ContainsKeywordCI unexpectedly matched a different connection")
 	}
 }

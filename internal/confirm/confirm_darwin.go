@@ -20,14 +20,15 @@ type ConfirmRequest struct {
 	Connection                  string
 	ConnectionIndex             int
 	SourceLabel                 string
+	WhitelistPath               string
+	WhitelistConnection         string
+	ReviewTriggerDetails        []string
 }
 
 // ConfirmResult reports how the review dialog was approved.
 type ConfirmResult struct {
-	Approved     bool
-	AllowHeader  bool
-	AllowKeyword bool
-	Keyword      string
+	Approved    bool
+	AllowHeader bool
 }
 
 // Confirmer handles user confirmation dialogs on macOS.
@@ -83,6 +84,16 @@ func buildConfirmMessage(req *ConfirmRequest) string {
 		sb.WriteString("Matched Keywords: ")
 		sb.WriteString(strings.ToUpper(strings.Join(req.MatchedKeywords, ", ")))
 		sb.WriteString("\n\n")
+	}
+
+	if len(req.ReviewTriggerDetails) > 0 {
+		sb.WriteString("Review Triggers:\n")
+		for _, item := range req.ReviewTriggerDetails {
+			sb.WriteString("- ")
+			sb.WriteString(item)
+			sb.WriteString("\n")
+		}
+		sb.WriteString("\n")
 	}
 
 	// Statement type

@@ -198,10 +198,13 @@ func NewServer(cfg *config.Config) (*Server, error) {
 }
 
 type reviewDecision struct {
-	analysis   *sqlanalyzer.AnalysisResult
-	stmtType   string
-	approval   audit.ApprovalStatus
-	headerLine string
+	analysis         *sqlanalyzer.AnalysisResult
+	stmtType         string
+	approval         audit.ApprovalStatus
+	headerLine       string
+	logHeaderLine    bool
+	auditKeywords    []string
+	expandedKeywords []string
 }
 
 // Run starts the MCP server and processes requests.
@@ -433,10 +436,13 @@ func (s *Server) tryConfirmDangerousSQL(req *jsonRPCRequest, sql, displayConnect
 		(s.config.Security.RequireConfirmForDDL && analysis.IsDDL)
 	if !needsConfirmation {
 		return &reviewDecision{
-			analysis:   analysis,
-			stmtType:   stmtType,
-			approval:   audit.ApprovalApproved,
-			headerLine: headerLine,
+			analysis:         analysis,
+			stmtType:         stmtType,
+			approval:         audit.ApprovalApproved,
+			headerLine:       headerLine,
+			logHeaderLine:    false,
+			auditKeywords:    analysis.MatchedKeywords,
+			expandedKeywords: nil,
 		}, true
 	}
 
@@ -453,21 +459,97 @@ func (s *Server) tryConfirmDangerousSQL(req *jsonRPCRequest, sql, displayConnect
 		}
 		if allowed {
 			return &reviewDecision{
-				analysis:   analysis,
-				stmtType:   stmtType,
-				approval:   audit.ApprovalWhitelist,
-				headerLine: headerLine,
+				analysis:         analysis,
+				stmtType:         stmtType,
+				approval:         audit.ApprovalWhitelist,
+				headerLine:       headerLine,
+				logHeaderLine:    true,
+				auditKeywords:    analysis.MatchedKeywords,
+				expandedKeywords: nil,
 			}, true
 		}
+		unresolvedKeywords, unresolvedMatches, allKeywordMatchesAllowed, allowedExpandedKeywords, err := s.filterWhitelistedKeywords(connectionKey, sql, analysis.MatchedKeywords)
+		if err != nil {
+			s.logAudit(sql, analysis.MatchedKeywords, audit.ApprovalRejected, "WHITELIST_ERROR: "+err.Error(), displayConnection, nil)
+			s.sendToolError(req.ID, fmt.Sprintf("Whitelist read error: %v", err))
+			return nil, false
+		}
+		if allKeywordMatchesAllowed && !(s.config.Security.RequireConfirmForDDL && analysis.IsDDL) {
+			return &reviewDecision{
+				analysis:         analysis,
+				stmtType:         stmtType,
+				approval:         audit.ApprovalWhitelist,
+				headerLine:       headerLine,
+				logHeaderLine:    false,
+				auditKeywords:    analysis.MatchedKeywords,
+				expandedKeywords: allowedExpandedKeywords,
+			}, true
+		}
+		analysis.MatchedKeywords = unresolvedKeywords
+		analysis.IsDangerous = len(unresolvedKeywords) > 0
+		analysisForHighlight := sqlanalyzer.UniqueExpandedKeywords(unresolvedMatches)
+		confirmReq := &confirm.ConfirmRequest{
+			SQL:                         sql,
+			MatchedKeywords:             analysis.MatchedKeywords,
+			MatchedKeywordsForHighlight: analysisForHighlight,
+			StatementType:               stmtType,
+			IsDDL:                       analysis.IsDDL,
+			Connection:                  displayConnection,
+			ConnectionIndex:             connectionIndexInPool(s.executorPool, displayConnection),
+			SourceLabel:                 sourceLabel,
+			WhitelistPath:               whitelistPath(s.whitelist),
+			WhitelistConnection:         connectionKey,
+			ReviewTriggerDetails:        formatReviewTriggerDetails(unresolvedMatches),
+		}
+		confirmResult, err := s.confirmer.Confirm(confirmReq)
+		if err != nil {
+			s.logAudit(sql, analysis.MatchedKeywords, audit.ApprovalRejected, "CONFIRM_ERROR: "+err.Error(), displayConnection, nil)
+			s.sendToolError(req.ID, fmt.Sprintf("Confirmation dialog error: %v", err))
+			return nil, false
+		}
+		if !confirmResult.Approved {
+			s.logAudit(sql, analysis.MatchedKeywords, audit.ApprovalRejected, "USER_REJECTED", displayConnection, nil)
+			s.sendError(req.ID, ErrCodeUserRejected, "Execution cancelled by user", map[string]interface{}{
+				"code":             "USER_REJECTED",
+				"matched_keywords": analysis.MatchedKeywords,
+			})
+			return nil, false
+		}
+
+		approval := audit.ApprovalApproved
+		if confirmResult.AllowHeader {
+			if s.whitelist == nil {
+				s.sendToolError(req.ID, "Whitelist is not available")
+				return nil, false
+			}
+			if err := s.whitelist.AddHeadLine(connectionKey, headerLine); err != nil {
+				s.logAudit(sql, analysis.MatchedKeywords, audit.ApprovalRejected, "WHITELIST_ERROR: "+err.Error(), displayConnection, nil)
+				s.sendToolError(req.ID, fmt.Sprintf("Whitelist write error: %v", err))
+				return nil, false
+			}
+			approval = audit.ApprovalWhitelist
+		}
+
+		return &reviewDecision{
+			analysis:         analysis,
+			stmtType:         stmtType,
+			approval:         approval,
+			headerLine:       headerLine,
+			logHeaderLine:    confirmResult.AllowHeader,
+			auditKeywords:    analysis.MatchedKeywords,
+			expandedKeywords: analysisForHighlight,
+		}, true
 	}
 	confirmReq := &confirm.ConfirmRequest{
-		SQL:             sql,
-		MatchedKeywords: analysis.MatchedKeywords,
-		StatementType:   stmtType,
-		IsDDL:           analysis.IsDDL,
-		Connection:      displayConnection,
-		ConnectionIndex: connectionIndexInPool(s.executorPool, displayConnection),
-		SourceLabel:     sourceLabel,
+		SQL:                 sql,
+		MatchedKeywords:     analysis.MatchedKeywords,
+		StatementType:       stmtType,
+		IsDDL:               analysis.IsDDL,
+		Connection:          displayConnection,
+		ConnectionIndex:     connectionIndexInPool(s.executorPool, displayConnection),
+		SourceLabel:         sourceLabel,
+		WhitelistPath:       whitelistPath(s.whitelist),
+		WhitelistConnection: connectionKey,
 	}
 	confirmResult, err := s.confirmer.Confirm(confirmReq)
 	if err != nil {
@@ -485,22 +567,6 @@ func (s *Server) tryConfirmDangerousSQL(req *jsonRPCRequest, sql, displayConnect
 	}
 
 	approval := audit.ApprovalApproved
-	if confirmResult.AllowKeyword {
-		keyword := strings.TrimSpace(confirmResult.Keyword)
-		if keyword == "" {
-			s.sendToolError(req.ID, "Keyword cannot be empty")
-			return nil, false
-		}
-		if s.whitelist == nil {
-			s.sendToolError(req.ID, "Whitelist is not available")
-			return nil, false
-		}
-		if err := s.whitelist.AddKeyword(connectionKey, keyword); err != nil {
-			s.logAudit(sql, analysis.MatchedKeywords, audit.ApprovalRejected, "WHITELIST_ERROR: "+err.Error(), displayConnection, nil)
-			s.sendToolError(req.ID, fmt.Sprintf("Whitelist write error: %v", err))
-			return nil, false
-		}
-	}
 	if confirmResult.AllowHeader {
 		if s.whitelist == nil {
 			s.sendToolError(req.ID, "Whitelist is not available")
@@ -515,10 +581,13 @@ func (s *Server) tryConfirmDangerousSQL(req *jsonRPCRequest, sql, displayConnect
 	}
 
 	return &reviewDecision{
-		analysis:   analysis,
-		stmtType:   stmtType,
-		approval:   approval,
-		headerLine: headerLine,
+		analysis:         analysis,
+		stmtType:         stmtType,
+		approval:         approval,
+		headerLine:       headerLine,
+		logHeaderLine:    confirmResult.AllowHeader,
+		auditKeywords:    analysis.MatchedKeywords,
+		expandedKeywords: nil,
 	}, true
 }
 
@@ -564,13 +633,13 @@ func (s *Server) handleExecuteSQL(req *jsonRPCRequest, args map[string]interface
 	if err != nil {
 		// Approved=true: execution was attempted after passing confirmation (or confirmation was not required).
 		// Do not use false here — that would imply USER_REJECTED while ORA-* proves the server ran the statement.
-		s.logAudit(sql, review.analysis.MatchedKeywords, review.approval, "EXECUTION_ERROR: "+err.Error(), displayConnection, reviewHeaderLineOption(review))
+		s.logAudit(sql, review.auditKeywords, review.approval, "EXECUTION_ERROR: "+err.Error(), displayConnection, reviewHeaderLineOption(review))
 		s.sendToolError(req.ID, fmt.Sprintf("SQL execution failed: %v", err))
 		return
 	}
 
 	// Log successful execution
-	s.logAudit(sql, review.analysis.MatchedKeywords, review.approval, "SUCCESS", displayConnection, reviewHeaderLineOption(review))
+	s.logAudit(sql, review.auditKeywords, review.approval, "SUCCESS", displayConnection, reviewHeaderLineOption(review))
 
 	if s.config.Logging.VerboseLogging {
 		msg := fmt.Sprintf("[debug] Execute Action: %s, Connection: %s\n", review.stmtType, displayConnection)
@@ -648,12 +717,12 @@ func (s *Server) handleExecuteSQLFile(req *jsonRPCRequest, args map[string]inter
 	ctx := context.Background()
 	result, err := s.executorPool.Execute(ctx, connectionName, sql, review.stmtType)
 	if err != nil {
-		s.logAudit(sql, review.analysis.MatchedKeywords, review.approval, "EXECUTION_ERROR: "+err.Error(), displayConnection, reviewHeaderLineOption(review))
+		s.logAudit(sql, review.auditKeywords, review.approval, "EXECUTION_ERROR: "+err.Error(), displayConnection, reviewHeaderLineOption(review))
 		s.sendToolError(req.ID, fmt.Sprintf("SQL execution failed: %v", err))
 		return
 	}
 
-	s.logAudit(sql, review.analysis.MatchedKeywords, review.approval, "SUCCESS", displayConnection, reviewHeaderLineOption(review))
+	s.logAudit(sql, review.auditKeywords, review.approval, "SUCCESS", displayConnection, reviewHeaderLineOption(review))
 
 	if s.config.Logging.VerboseLogging {
 		msg := fmt.Sprintf("[debug] Execute File Action: %s, Connection: %s, File: %s\n", review.stmtType, displayConnection, filePath)
@@ -747,7 +816,7 @@ func (s *Server) handleQueryToCSVFile(req *jsonRPCRequest, args map[string]inter
 	ctx := context.Background()
 	rowsWritten, err := s.executorPool.ExecuteToCSVFile(ctx, connectionName, sqlStr, filePath)
 	if err != nil {
-		s.logAudit(sqlStr, review.analysis.MatchedKeywords, review.approval, "QUERY_TO_CSV_ERROR: "+err.Error(), displayConnection, reviewHeaderLineOption(review))
+		s.logAudit(sqlStr, review.auditKeywords, review.approval, "QUERY_TO_CSV_ERROR: "+err.Error(), displayConnection, reviewHeaderLineOption(review))
 		if strings.Contains(strings.ToLower(err.Error()), "unavailable") || strings.Contains(strings.ToLower(err.Error()), "connection") {
 			s.sendToolError(req.ID, "Connection is currently unavailable; call list_connections to retry.")
 		} else {
@@ -756,7 +825,7 @@ func (s *Server) handleQueryToCSVFile(req *jsonRPCRequest, args map[string]inter
 		return
 	}
 
-	s.logAudit(sqlStr, review.analysis.MatchedKeywords, review.approval, "QUERY_TO_CSV", displayConnection, reviewHeaderLineOption(review))
+	s.logAudit(sqlStr, review.auditKeywords, review.approval, "QUERY_TO_CSV", displayConnection, reviewHeaderLineOption(review))
 	out := map[string]interface{}{
 		"file_path":    filePath,
 		"rows_written": rowsWritten,
@@ -828,7 +897,7 @@ func (s *Server) handleQueryToTextFile(req *jsonRPCRequest, args map[string]inte
 	ctx := context.Background()
 	rowsWritten, err := s.executorPool.ExecuteToTextFile(ctx, connectionName, sqlStr, filePath)
 	if err != nil {
-		s.logAudit(sqlStr, review.analysis.MatchedKeywords, review.approval, "QUERY_TO_TEXT_ERROR: "+err.Error(), displayConnection, reviewHeaderLineOption(review))
+		s.logAudit(sqlStr, review.auditKeywords, review.approval, "QUERY_TO_TEXT_ERROR: "+err.Error(), displayConnection, reviewHeaderLineOption(review))
 		if strings.Contains(strings.ToLower(err.Error()), "unavailable") || strings.Contains(strings.ToLower(err.Error()), "connection") {
 			s.sendToolError(req.ID, "Connection is currently unavailable; call list_connections to retry.")
 		} else {
@@ -837,7 +906,7 @@ func (s *Server) handleQueryToTextFile(req *jsonRPCRequest, args map[string]inte
 		return
 	}
 
-	s.logAudit(sqlStr, review.analysis.MatchedKeywords, review.approval, "QUERY_TO_TEXT", displayConnection, reviewHeaderLineOption(review))
+	s.logAudit(sqlStr, review.auditKeywords, review.approval, "QUERY_TO_TEXT", displayConnection, reviewHeaderLineOption(review))
 	out := map[string]interface{}{
 		"file_path":    filePath,
 		"rows_written": rowsWritten,
@@ -964,10 +1033,82 @@ func firstSQLLine(sql string) string {
 }
 
 func reviewHeaderLineOption(review *reviewDecision) *audit.LogOptions {
-	if review == nil || review.approval != audit.ApprovalWhitelist {
+	if review == nil {
 		return nil
 	}
-	return &audit.LogOptions{HeaderLine: &review.headerLine}
+	options := &audit.LogOptions{
+		ExpandedKeywords: review.expandedKeywords,
+	}
+	if review.approval == audit.ApprovalWhitelist && review.logHeaderLine {
+		options.HeaderLine = &review.headerLine
+	}
+	if options.HeaderLine == nil && len(options.ExpandedKeywords) == 0 {
+		return nil
+	}
+	return options
+}
+
+func whitelistPath(store *reviewwhitelist.Store) string {
+	if store == nil {
+		return ""
+	}
+	return store.Path()
+}
+
+func (s *Server) filterWhitelistedKeywords(connectionKey, sql string, matchedKeywords []string) ([]string, []sqlanalyzer.ExpandedKeywordMatch, bool, []string, error) {
+	if s.whitelist == nil {
+		return matchedKeywords, nil, false, nil, nil
+	}
+
+	matches := sqlanalyzer.ExpandMatchedKeywordMatches(sql, matchedKeywords)
+	if len(matches) == 0 {
+		return matchedKeywords, nil, false, nil, nil
+	}
+
+	unresolved := make(map[string]struct{})
+	var unresolvedMatches []sqlanalyzer.ExpandedKeywordMatch
+	var allowedMatches []sqlanalyzer.ExpandedKeywordMatch
+	allAllowed := true
+	for _, match := range matches {
+		allowed, err := s.whitelist.ContainsKeywordCI(connectionKey, match.Expanded)
+		if err != nil {
+			return nil, nil, false, nil, err
+		}
+		if !allowed {
+			unresolved[match.MatchedKeyword] = struct{}{}
+			allAllowed = false
+			unresolvedMatches = append(unresolvedMatches, match)
+		} else {
+			allowedMatches = append(allowedMatches, match)
+		}
+	}
+
+	if allAllowed {
+		return nil, nil, true, sqlanalyzer.UniqueExpandedKeywords(allowedMatches), nil
+	}
+
+	var unresolvedKeywords []string
+	for _, keyword := range matchedKeywords {
+		if _, ok := unresolved[keyword]; ok {
+			unresolvedKeywords = append(unresolvedKeywords, keyword)
+		}
+	}
+	return unresolvedKeywords, unresolvedMatches, false, sqlanalyzer.UniqueExpandedKeywords(allowedMatches), nil
+}
+
+func formatReviewTriggerDetails(matches []sqlanalyzer.ExpandedKeywordMatch) []string {
+	seen := make(map[string]struct{})
+	var out []string
+	for _, match := range matches {
+		label := match.MatchedKeyword + " -> " + match.Expanded
+		key := strings.ToLower(label)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, label)
+	}
+	return out
 }
 
 // connectionIndexInPool returns the 0-based index of the named connection for review UI header color (Java parity).
