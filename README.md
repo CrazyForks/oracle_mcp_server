@@ -23,15 +23,18 @@ A Model Context Protocol (MCP) server for Oracle Database, enabling AI assistant
 - **Execute from file**: Run a full SQL file via `execute_sql_file`; trailing SQL*Plus `/` is stripped automatically
 - **Query to file**: `query_to_csv_file` (result as CSV, RFC 4180, UTF-8) and `query_to_text_file` (plain text, tab-separated, CLOB in full; e.g. for procedure source)
 - **PL/SQL blocks**: CREATE PROCEDURE/FUNCTION/PACKAGE (including files with leading comments) and anonymous blocks are executed as one unit
-- **Human-in-the-loop**: Configurable danger keywords trigger a review window with full SQL (syntax-highlighted on Windows); Database | Action | Keywords | DDL on the first line, File on the second; focus stays on content, not buttons
+- **Human-in-the-loop review UI**: Configurable danger keywords trigger a review window with full SQL. The `Keywords` area shows the actual expanded identifiers that triggered review (for example `created_at`, not just `create`)
+- **Whitelist review bypass**: `Allow Header` saves the SQL first line to `whitelist.json` and skips future review for the same connection + header line
+- **Whitelist keyword filtering**: `Allow Keyword` saves a keyword to `whitelist.json` without approving the current review; future matches remove only that specific expanded keyword trigger, while other unmatched dangerous triggers still open review
+- **Whitelist keyword guardrails**: review UI only accepts whitelist keywords made of letters, numbers, and underscores, and blocks values that exactly match `danger_keywords` (case-insensitive)
 - **Danger keyword matching**: `whole_text` (substring in full SQL) or `tokens` (exact token match; e.g. `created_at` does not match `create`)
 - **Multi-database**: Configure multiple connections; use `list_connections` to see names and status (failed connections are retried on each list; only `list_connections` re-validates—other tools fast-fail on an unavailable connection until you call it again)
-- **Audit logging**: Keyed fields (`AUDIT_TIME`, `AUDIT_CONNECTION`, `AUDIT_KEYWORDS`, `AUDIT_APPROVED`, `AUDIT_ACTION`, `AUDIT_SQL`), full SQL, record separator `######AUDIT_END######`; 10MB rotation, reuse last non-full file on startup, filenames include creation date (e.g. `audit_2006-01-02_150405.log`)
+- **Audit logging**: Keyed fields (`AUDIT_TIME`, `AUDIT_CONNECTION`, `AUDIT_KEYWORDS`, `AUDIT_APPROVED`, `AUDIT_ACTION`, `AUDIT_SQL`) plus whitelist context such as `HEADER_LINE` and `EXPANDED_KEYWORDS`; full SQL, record separator `######AUDIT_END######`; 10MB rotation, reuse last non-full file on startup, filenames include creation date (e.g. `audit_2006-01-02_150405.log`)
 - **Connection security**: Database connection strings (including passwords) in `config.yaml` are automatically encrypted on first startup — no manual steps required
-- **Cross-platform**: Windows (WinForms + WebBrowser for review), macOS (osascript dialog)
+- **Cross-platform review UI**: Windows (WinForms + WebBrowser) and macOS (JXA/Cocoa dialog) both support `Allow Keyword`, `Allow Header`, `Execute`, and `Cancel`
 - **Single executable**: Standalone binary (requires Oracle Instant Client)
 
-<img src="https://www.alvinliu.com/wp-content/uploads/2026/03/db_mcp_color_bar.png" alt="db_mcp confirmation window" />
+<img src="https://www.alvinliu.com/wp-content/uploads/2026/04/db_mcp_whilelist.png" alt="db_mcp confirmation window" />
 
 ## Requirements
 
@@ -221,8 +224,13 @@ query_to_text_file({ "sql": "SELECT text FROM user_source WHERE name='MY_PROC'",
 
 When SQL matches `danger_keywords` or is DDL (if `require_confirm_for_ddl` is true), a confirmation window appears:
 
-- **Windows**: WinForms window with syntax-highlighted SQL (WebBrowser). First line: Database | Action | Keywords | DDL; second line: File (when from `execute_sql_file`). Focus is on the SQL content, not the Execute/Cancel buttons.
-- **macOS**: osascript dialog with full SQL.
+- **Keywords display**: the review header shows the actual expanded identifiers that triggered review, not just the original configured danger keyword
+- **Allow Header**: stores the current SQL first line in `whitelist.json`; future SQL on the same connection with the same first line skips review
+- **Allow Keyword**: stores one keyword in `whitelist.json` but does **not** approve the current review; users can add multiple keywords before choosing `Execute` or `Cancel`
+- **Keyword whitelist behavior**: a whitelisted keyword removes only that specific expanded-keyword trigger; if the same SQL still has other dangerous unmatched triggers, review still opens
+- **Whitelist storage**: `whitelist.json` is stored in the executable directory / program directory
+- **Windows**: WinForms window with syntax-highlighted SQL (WebBrowser)
+- **macOS**: JXA/Cocoa dialog with the same review actions as Windows
 
 Execution proceeds only after the user confirms. Rejection is logged and returned as `USER_REJECTED`.
 
@@ -235,7 +243,7 @@ Execution proceeds only after the user confirms. Rejection is logged and returne
 
 ## Audit Log
 
-- **Keyed format**: `AUDIT_TIME=...`, `AUDIT_CONNECTION=...`, `AUDIT_KEYWORDS=...`, `AUDIT_APPROVED=...`, `AUDIT_ACTION=...`, `AUDIT_SQL=` followed by the full SQL, then a line `######AUDIT_END######` as record separator.
+- **Keyed format**: `AUDIT_TIME=...`, `AUDIT_CONNECTION=...`, `AUDIT_KEYWORDS=...`, `AUDIT_APPROVED=...`, `AUDIT_ACTION=...`, optional `HEADER_LINE=...`, optional `EXPANDED_KEYWORDS=...`, then `AUDIT_SQL=` followed by the full SQL, then a line `######AUDIT_END######` as record separator.
 - **Rotation**: 10MB per file. On startup, the most recent existing log file under 10MB is reused; when full, a new file is created with creation date in the name: `audit_2006-01-02_150405.log`.
 
 ## MCP Protocol
@@ -393,15 +401,18 @@ B站视频介绍: [Cursor连接Oracle自动编写存储过程](https://www.bilib
 - **从文件执行**：通过 `execute_sql_file` 执行整个 SQL 文件；自动去除末尾 SQL*Plus 的 `/`
 - **查询结果写入文件**：`query_to_csv_file`（结果写为 CSV，RFC 4180，UTF-8）与 `query_to_text_file`（纯文本、制表符分隔、CLOB 完整输出，如存过程源码）
 - **PL/SQL 块**：CREATE PROCEDURE/FUNCTION/PACKAGE（含文件头部注释）及匿名块作为整体执行
-- **人工确认**：可配置危险关键词，触发带完整 SQL 的确认窗口（Windows 下语法高亮）；首行：数据库 | 操作 | 关键词 | DDL，第二行：文件（来自 `execute_sql_file` 时）；焦点在 SQL 内容而非按钮
+- **人工确认窗口**：可配置危险关键词，触发带完整 SQL 的确认窗口；`Keywords` 区域显示的是真正命中的 expanded keyword（例如显示 `created_at`，而不是只显示 `create`）
+- **Header 白名单**：`Allow Header` 会把 SQL 第一行写入 `whitelist.json`，下次同一连接且第一行相同的 SQL 直接跳过 review
+- **Keyword 白名单**：`Allow Keyword` 只把关键字写入 `whitelist.json`，不会自动批准当前 review；后续只会消掉该 expanded keyword 对应的触发项，其他未放行触发项仍会继续弹出 review
+- **Keyword 白名单限制**：只能添加字母、数字、下划线组成的关键字；如果与 `danger_keywords` 中某项完全相同（忽略大小写）则禁止添加
 - **危险词匹配**：`whole_text`（整段 SQL 子串）或 `tokens`（精确词匹配，如 `created_at` 不匹配 `create`）
 - **多数据库**：可配置多个连接；用 `list_connections` 查看名称与状态（失败连接每次列出时会重试；仅 `list_connections` 会重新校验—其他工具在连接不可用时直接报错，需再次调用 list_connections 后重试）
-- **审计日志**：键值字段（`AUDIT_TIME`、`AUDIT_CONNECTION`、`AUDIT_KEYWORDS`、`AUDIT_APPROVED`、`AUDIT_ACTION`、`AUDIT_SQL`）、完整 SQL、记录分隔符 `######AUDIT_END######`；单文件 10MB 轮转，启动时复用最近未满的日志，文件名含创建日期（如 `audit_2006-01-02_150405.log`）
+- **审计日志**：键值字段（`AUDIT_TIME`、`AUDIT_CONNECTION`、`AUDIT_KEYWORDS`、`AUDIT_APPROVED`、`AUDIT_ACTION`、`AUDIT_SQL`），并可附带 `HEADER_LINE`、`EXPANDED_KEYWORDS`；完整 SQL、记录分隔符 `######AUDIT_END######`；单文件 10MB 轮转，启动时复用最近未满的日志，文件名含创建日期（如 `audit_2006-01-02_150405.log`）
 - **连接安全**：`config.yaml` 中的数据库连接串（含密码）在首次启动时自动加密，无需任何手动操作
-- **跨平台**：Windows（WinForms + WebBrowser 确认）、macOS（osascript 对话框）
+- **跨平台确认窗口**：Windows（WinForms + WebBrowser）与 macOS（JXA/Cocoa）都支持 `Allow Keyword`、`Allow Header`、`Execute`、`Cancel`
 - **单可执行文件**：独立二进制（需安装 Oracle Instant Client）
 
-<img src="https://www.alvinliu.com/wp-content/uploads/2026/03/db_mcp_color_bar.png" alt="db_mcp confirmation window" />
+<img src="https://www.alvinliu.com/wp-content/uploads/2026/04/db_mcp_whilelist.png" alt="db_mcp confirmation window" />
 
 ## 环境要求
 
@@ -589,8 +600,13 @@ query_to_text_file({ "sql": "SELECT text FROM user_source WHERE name='MY_PROC'",
 
 当 SQL 命中 `danger_keywords` 或为 DDL（且 `require_confirm_for_ddl` 为 true）时，会弹出确认窗口：
 
-- **Windows**：WinForms 窗口，SQL 语法高亮（WebBrowser）。首行：数据库 | 操作 | 关键词 | DDL；第二行：文件（来自 `execute_sql_file` 时）。焦点在 SQL 内容上。
-- **macOS**：osascript 对话框显示完整 SQL。
+- **关键词展示**：窗口中的 `Keywords` 显示真正命中的 expanded keyword，而不是原始 danger keyword
+- **Allow Header**：把当前 SQL 第一行写入 `whitelist.json`；同一连接下第一行再次匹配时直接跳过 review
+- **Allow Keyword**：只写入一个 keyword 到 `whitelist.json`，不会批准当前 review；可以在同一个窗口里连续添加多个 keyword
+- **Keyword 白名单行为**：某个 keyword 被放行后，只会消掉它自己对应的 expanded keyword 触发项；如果 SQL 里还有其他未放行危险项，仍然会弹出 review
+- **白名单位置**：`whitelist.json` 位于程序目录 / 可执行文件目录
+- **Windows**：WinForms 窗口，SQL 语法高亮（WebBrowser）
+- **macOS**：JXA/Cocoa 窗口，交互语义与 Windows 一致
 
 用户确认后才会执行。拒绝会记录并返回 `USER_REJECTED`。
 
@@ -603,7 +619,7 @@ query_to_text_file({ "sql": "SELECT text FROM user_source WHERE name='MY_PROC'",
 
 ## 审计日志
 
-- **键值格式**：`AUDIT_TIME=...`、`AUDIT_CONNECTION=...`、`AUDIT_KEYWORDS=...`、`AUDIT_APPROVED=...`、`AUDIT_ACTION=...`、`AUDIT_SQL=` 后跟完整 SQL，再以 `######AUDIT_END######` 作为记录分隔。
+- **键值格式**：`AUDIT_TIME=...`、`AUDIT_CONNECTION=...`、`AUDIT_KEYWORDS=...`、`AUDIT_APPROVED=...`、`AUDIT_ACTION=...`，以及可选的 `HEADER_LINE=...`、`EXPANDED_KEYWORDS=...`，然后是 `AUDIT_SQL=` 后跟完整 SQL，再以 `######AUDIT_END######` 作为记录分隔。
 - **轮转**：单文件 10MB。启动时复用最近未满的日志文件；写满后新建带创建日期的文件，如 `audit_2006-01-02_150405.log`。
 
 ## MCP 协议

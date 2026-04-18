@@ -154,10 +154,22 @@ This guide assumes you have downloaded the release zip containing the binary for
 - **execute_sql** — Run SQL on the configured database(s). Params: `sql`, optional `connection`. When more than one connection is configured, pass `connection` with one of the names from `list_connections`. Dangerous or DDL statements open a **confirmation window** that shows the **database alias** and **operation type** (with extra spacing for clarity). You must confirm before execution. Do not specify schema-qualified object names such as `hr.employees`; the server rejects them.
 - **execute_sql_file** — Read SQL from a file, apply the same review rules as `execute_sql`, then execute. Trailing SQL*Plus `/` is stripped. Params: `file_path`, optional `connection`. SQL in the file must not specify schema-qualified object names such as `hr.employees`.
 - **list_connections** — List configured connection names and availability. Use these as the `connection` argument in other tools. Only this tool re-validates failed connections; other tools fast-fail on an unavailable connection until you call list_connections again.
-- **query_to_csv_file** — Run a query and write the result to a file as CSV (header + rows, UTF-8, RFC 4180). Params: `sql`, `file_path` (absolute), optional `connection`. No confirmation dialog. Do not specify schema-qualified object names such as `hr.employees`.
-- **query_to_text_file** — Run a query and write the result to a file as plain text (tab-separated, no header; CLOB in full; e.g. for procedure source). Params: `sql`, `file_path` (absolute), optional `connection`. No confirmation dialog. Do not specify schema-qualified object names such as `hr.employees`.
+- **query_to_csv_file** — Run a query and write the result to a file as CSV (header + rows, UTF-8, RFC 4180). Params: `sql`, `file_path` (absolute), optional `connection`. Same review rules as `execute_sql` when SQL matches danger keywords or DDL. Do not specify schema-qualified object names such as `hr.employees`.
+- **query_to_text_file** — Run a query and write the result to a file as plain text (tab-separated, no header; CLOB in full; e.g. for procedure source). Params: `sql`, `file_path` (absolute), optional `connection`. Same review rules as `execute_sql` when SQL matches danger keywords or DDL. Do not specify schema-qualified object names such as `hr.employees`.
 
 **Audit log** (`audit.log`, if enabled in config): each entry includes `CONNECTION=<alias>` so you can see which database was used (e.g. `CONNECTION=database1`, `CONNECTION=database2`).
+
+## 5. Review whitelist
+
+- The review whitelist file is `whitelist.json` in the **program directory / executable directory**
+- `Allow Header` stores the current SQL first line under the current connection. Future SQL on the same connection with the same first line skips review completely
+- `Allow Keyword` stores one keyword under the current connection, but it does **not** approve the current review. You can add multiple keywords first, then choose `Execute` or `Cancel`
+- Whitelisted keywords only remove their own expanded-keyword trigger. If the same SQL still has other dangerous unmatched triggers, the review window still opens
+- In the review window, the `Keywords` area shows the **expanded keyword** that really triggered review, not the original `danger_keywords` item
+- `Allow Keyword` accepts only letters, numbers, and underscores
+- `Allow Keyword` rejects values that exactly match `danger_keywords` (case-insensitive)
+- There is currently **no delete button** for whitelist entries. To remove a header or keyword, open `whitelist.json` in the program directory and delete the corresponding item manually
+- If you edit `whitelist.json` manually, keep it valid JSON. The server reads it directly on the next review
 
 ---
 
@@ -328,10 +340,22 @@ This guide assumes you have downloaded the release zip containing the binary for
 - **execute_sql** — 在已配置的数据库上执行 SQL。参数：`sql`，可选 `connection`。配置了多个连接时，传入 `list_connections` 返回的名称之一作为 `connection`。危险或 DDL 语句会弹出 **确认窗口**，显示 **数据库别名** 和 **操作类型**，需确认后才会执行。不要指定带 schema 的对象名，例如 `hr.employees`；服务端会直接拒绝。
 - **execute_sql_file** — 从文件读取 SQL，应用与 `execute_sql` 相同的审查规则后执行。末尾 SQL*Plus 的 `/` 会被去除。参数：`file_path`，可选 `connection`。文件中的 SQL 也不能指定带 schema 的对象名，例如 `hr.employees`。
 - **list_connections** — 列出已配置连接名称及可用性。可将返回的名称作为其他工具的 `connection` 参数。仅此工具会重新校验失败连接；其他工具在连接不可用时直接报错，需再次调用 list_connections 后重试。
-- **query_to_csv_file** — 执行查询并将结果以 CSV（表头+行，UTF-8，RFC 4180）写入文件。参数：`sql`、`file_path`（绝对路径），可选 `connection`。无确认对话框。不要指定带 schema 的对象名，例如 `hr.employees`。
-- **query_to_text_file** — 执行查询并将结果以纯文本（制表符分隔、无表头；CLOB 完整，如存过程源码）写入文件。参数：`sql`、`file_path`（绝对路径），可选 `connection`。无确认对话框。不要指定带 schema 的对象名，例如 `hr.employees`。
+- **query_to_csv_file** — 执行查询并将结果以 CSV（表头+行，UTF-8，RFC 4180）写入文件。参数：`sql`、`file_path`（绝对路径），可选 `connection`。如果 SQL 命中危险词或 DDL，则与 `execute_sql` 一样会触发 review。不要指定带 schema 的对象名，例如 `hr.employees`。
+- **query_to_text_file** — 执行查询并将结果以纯文本（制表符分隔、无表头；CLOB 完整，如存过程源码）写入文件。参数：`sql`、`file_path`（绝对路径），可选 `connection`。如果 SQL 命中危险词或 DDL，则与 `execute_sql` 一样会触发 review。不要指定带 schema 的对象名，例如 `hr.employees`。
 
 **审计日志**（若在配置中启用 `audit.log`）：每条记录包含 `CONNECTION=<别名>`，便于查看使用的数据库（如 `CONNECTION=database1`、`CONNECTION=database2`）。
+
+## 5. Review 白名单
+
+- review 白名单文件名为 `whitelist.json`，位置在**程序目录 / 可执行文件目录**
+- `Allow Header` 会把当前 SQL 第一行保存到当前连接下。之后同一连接且第一行相同的 SQL 会直接跳过 review
+- `Allow Keyword` 只会把一个 keyword 保存到当前连接下，但**不会**批准当前 review。你可以先连续添加多个 keyword，再决定 `Execute` 或 `Cancel`
+- keyword 白名单只会移除它自己对应的 expanded keyword 触发项。如果同一条 SQL 里还有其他未放行危险项，review 仍然会继续弹出
+- review 窗口中的 `Keywords` 显示的是**真正命中的 expanded keyword**，不是原始 `danger_keywords` 配置项
+- `Allow Keyword` 只允许字母、数字、下划线
+- `Allow Keyword` 不允许添加与 `danger_keywords` 完全相同的值（忽略大小写）
+- 目前**没有删除白名单记录的按钮**。如果你想删除 header 或 keyword，请到程序目录里手工编辑 `whitelist.json` 删除对应内容
+- 手工编辑 `whitelist.json` 时请保持 JSON 格式合法。服务会在下次 review 时直接读取它
 
 ---
 
