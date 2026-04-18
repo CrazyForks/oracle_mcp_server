@@ -491,6 +491,7 @@ func (s *Server) tryConfirmDangerousSQL(req *jsonRPCRequest, sql, displayConnect
 		confirmReq := &confirm.ConfirmRequest{
 			SQL:                         sql,
 			MatchedKeywords:             analysis.MatchedKeywords,
+			DisplayKeywords:             analysisForHighlight,
 			MatchedKeywordsForHighlight: analysisForHighlight,
 			StatementType:               stmtType,
 			IsDDL:                       analysis.IsDDL,
@@ -542,16 +543,18 @@ func (s *Server) tryConfirmDangerousSQL(req *jsonRPCRequest, sql, displayConnect
 		}, true
 	}
 	confirmReq := &confirm.ConfirmRequest{
-		SQL:                 sql,
-		MatchedKeywords:     analysis.MatchedKeywords,
-		StatementType:       stmtType,
-		IsDDL:               analysis.IsDDL,
-		Connection:          displayConnection,
-		ConnectionIndex:     connectionIndexInPool(s.executorPool, displayConnection),
-		SourceLabel:         sourceLabel,
-		WhitelistPath:       whitelistPath(s.whitelist),
-		WhitelistConnection: connectionKey,
-		DangerKeywords:      s.config.Security.DangerKeywords,
+		SQL:                         sql,
+		MatchedKeywords:             analysis.MatchedKeywords,
+		DisplayKeywords:             displayKeywordsForReview(sql, analysis.MatchedKeywords),
+		MatchedKeywordsForHighlight: displayKeywordsForReview(sql, analysis.MatchedKeywords),
+		StatementType:               stmtType,
+		IsDDL:                       analysis.IsDDL,
+		Connection:                  displayConnection,
+		ConnectionIndex:             connectionIndexInPool(s.executorPool, displayConnection),
+		SourceLabel:                 sourceLabel,
+		WhitelistPath:               whitelistPath(s.whitelist),
+		WhitelistConnection:         connectionKey,
+		DangerKeywords:              s.config.Security.DangerKeywords,
 	}
 	confirmResult, err := s.confirmer.Confirm(confirmReq)
 	if err != nil {
@@ -1111,6 +1114,14 @@ func formatReviewTriggerDetails(matches []sqlanalyzer.ExpandedKeywordMatch) []st
 		out = append(out, label)
 	}
 	return out
+}
+
+func displayKeywordsForReview(sql string, matchedKeywords []string) []string {
+	displayKeywords := sqlanalyzer.UniqueExpandedKeywords(sqlanalyzer.ExpandMatchedKeywordMatches(sql, matchedKeywords))
+	if len(displayKeywords) > 0 {
+		return displayKeywords
+	}
+	return matchedKeywords
 }
 
 // connectionIndexInPool returns the 0-based index of the named connection for review UI header color (Java parity).

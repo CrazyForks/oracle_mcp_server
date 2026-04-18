@@ -13,6 +13,7 @@ import (
 type ConfirmRequest struct {
 	SQL                         string
 	MatchedKeywords             []string
+	DisplayKeywords             []string
 	MatchedKeywordsForHighlight []string
 	MatchedActions              []string
 	StatementType               string
@@ -81,20 +82,14 @@ func buildConfirmMessage(req *ConfirmRequest) string {
 	}
 
 	// Keywords section
-	if len(req.MatchedKeywords) > 0 {
-		sb.WriteString("Matched Keywords: ")
-		sb.WriteString(strings.ToUpper(strings.Join(req.MatchedKeywords, ", ")))
-		sb.WriteString("\n\n")
+	displayKeywords := req.DisplayKeywords
+	if len(displayKeywords) == 0 {
+		displayKeywords = req.MatchedKeywords
 	}
-
-	if len(req.ReviewTriggerDetails) > 0 {
-		sb.WriteString("Review Triggers:\n")
-		for _, item := range req.ReviewTriggerDetails {
-			sb.WriteString("- ")
-			sb.WriteString(item)
-			sb.WriteString("\n")
-		}
-		sb.WriteString("\n")
+	if len(displayKeywords) > 0 {
+		sb.WriteString("Matched Keywords: ")
+		sb.WriteString(strings.ToUpper(strings.Join(displayKeywords, ", ")))
+		sb.WriteString("\n\n")
 	}
 
 	// Statement type

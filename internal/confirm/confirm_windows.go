@@ -49,6 +49,7 @@ const (
 type ConfirmRequest struct {
 	SQL             string
 	MatchedKeywords []string
+	DisplayKeywords []string
 	// MatchedKeywordsForHighlight, if non-empty, limits red keyword markup to these terms (Java: hits on formatted text only).
 	MatchedKeywordsForHighlight []string
 	MatchedActions              []string // command_match statement types (Java parity); merged into red highlight when set
@@ -177,8 +178,12 @@ func buildConfirmHeader(req *ConfirmRequest) string {
 	} else if req.StatementType != "" {
 		line1 = append(line1, "Action: "+req.StatementType)
 	}
-	if len(req.MatchedKeywords) > 0 {
-		line1 = append(line1, "Keywords: "+strings.Join(req.MatchedKeywords, ", "))
+	displayKeywords := req.DisplayKeywords
+	if len(displayKeywords) == 0 {
+		displayKeywords = req.MatchedKeywords
+	}
+	if len(displayKeywords) > 0 {
+		line1 = append(line1, "Keywords: "+strings.Join(displayKeywords, ", "))
 	}
 	if req.IsDDL {
 		line1 = append(line1, "DDL (auto-committed)")
@@ -186,12 +191,6 @@ func buildConfirmHeader(req *ConfirmRequest) string {
 	var out string
 	if len(line1) > 0 {
 		out = strings.Join(line1, "    |    ")
-	}
-	if len(req.ReviewTriggerDetails) > 0 {
-		if out != "" {
-			out += "\n"
-		}
-		out += "Review triggers: " + strings.Join(req.ReviewTriggerDetails, "    |    ")
 	}
 	if req.SourceLabel != "" {
 		if out != "" {
