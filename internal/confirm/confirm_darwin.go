@@ -23,6 +23,7 @@ type ConfirmRequest struct {
 	WhitelistPath               string
 	WhitelistConnection         string
 	ReviewTriggerDetails        []string
+	DangerKeywords              []string
 }
 
 // ConfirmResult reports how the review dialog was approved.

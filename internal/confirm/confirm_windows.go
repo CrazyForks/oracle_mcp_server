@@ -5,6 +5,7 @@ package confirm
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"html"
 	"os"
@@ -60,6 +61,7 @@ type ConfirmRequest struct {
 	WhitelistPath        string
 	WhitelistConnection  string
 	ReviewTriggerDetails []string
+	DangerKeywords       []string
 }
 
 // ConfirmResult reports how the review dialog was approved.
@@ -84,6 +86,7 @@ func (c *Confirmer) Confirm(req *ConfirmRequest) (ConfirmResult, error) {
 	resultPath := filepath.Join(sqlDir, "oracle-mcp-confirm-result.txt")
 	scriptPath := filepath.Join(sqlDir, "oracle-mcp-confirm-dialog.ps1")
 	headerPath := filepath.Join(sqlDir, "oracle-mcp-confirm-header.txt")
+	dangerKeywordsPath := filepath.Join(sqlDir, "oracle-mcp-confirm-danger-keywords.json")
 
 	htmlContent := sqlHighlightHTML(req.SQL)
 	htmlContent = highlightMatchedKeywordsInHTML(htmlContent, highlightTermsForReview(req))
@@ -97,6 +100,19 @@ func (c *Confirmer) Confirm(req *ConfirmRequest) (ConfirmResult, error) {
 		return ConfirmResult{}, fmt.Errorf("confirm: cannot write header temp file: %w", err)
 	}
 	defer os.Remove(headerPath)
+
+	dangerKeywordsJSON := []byte("[]")
+	if len(req.DangerKeywords) > 0 {
+		var err error
+		dangerKeywordsJSON, err = json.Marshal(req.DangerKeywords)
+		if err != nil {
+			return ConfirmResult{}, fmt.Errorf("confirm: cannot marshal danger keywords: %w", err)
+		}
+	}
+	if err := os.WriteFile(dangerKeywordsPath, dangerKeywordsJSON, 0600); err != nil {
+		return ConfirmResult{}, fmt.Errorf("confirm: cannot write danger keywords temp file: %w", err)
+	}
+	defer os.Remove(dangerKeywordsPath)
 
 	if err := os.WriteFile(scriptPath, []byte(ps1Script), 0600); err != nil {
 		return ConfirmResult{}, fmt.Errorf("confirm: cannot write script temp file: %w", err)
@@ -112,7 +128,7 @@ func (c *Confirmer) Confirm(req *ConfirmRequest) (ConfirmResult, error) {
 
 	// -STA required for Windows Forms to display correctly
 	cmd := exec.Command("powershell.exe", "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-File", scriptPath,
-		"-HtmlPath", htmlPath, "-ResultPath", resultPath, "-HeaderPath", headerPath, "-WhitelistPath", req.WhitelistPath, "-WhitelistConnection", req.WhitelistConnection, "-Connection", connectionArg, "-HeaderColor", headerColor)
+		"-HtmlPath", htmlPath, "-ResultPath", resultPath, "-HeaderPath", headerPath, "-DangerKeywordsPath", dangerKeywordsPath, "-WhitelistPath", req.WhitelistPath, "-WhitelistConnection", req.WhitelistConnection, "-Connection", connectionArg, "-HeaderColor", headerColor)
 	cmd.Stdin = nil
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
@@ -479,8 +495,15 @@ func truncateSQL(sql string, maxLen int) string {
 
 // ps1Script is the PowerShell script for the confirmation form (WebBrowser with HTML syntax-highlighted SQL).
 const ps1Script = `
-param([string]$HtmlPath, [string]$ResultPath, [string]$HeaderPath, [string]$WhitelistPath, [string]$WhitelistConnection, [string]$Connection = "default", [string]$HeaderColor = "A5D6A7")
+param([string]$HtmlPath, [string]$ResultPath, [string]$HeaderPath, [string]$DangerKeywordsPath, [string]$WhitelistPath, [string]$WhitelistConnection, [string]$Connection = "default", [string]$HeaderColor = "A5D6A7")
 $Header = if (Test-Path $HeaderPath) { [System.IO.File]::ReadAllText($HeaderPath, [System.Text.Encoding]::UTF8) } else { "Confirm SQL execution" }
+$DangerKeywords = @()
+if (Test-Path $DangerKeywordsPath) {
+	$rawDangerKeywords = [System.IO.File]::ReadAllText($DangerKeywordsPath, [System.Text.Encoding]::UTF8).Trim()
+	if ($rawDangerKeywords -ne '') {
+		$DangerKeywords = @((ConvertFrom-Json -InputObject $rawDangerKeywords))
+	}
+}
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
@@ -602,6 +625,16 @@ $btnAllowKeyword.Add_Click({
 	if ([string]::IsNullOrWhiteSpace($txtKeyword.Text)) {
 		[System.Windows.Forms.MessageBox]::Show("Please enter a keyword first.", "Allow Keyword", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
 		return
+	}
+	if ($txtKeyword.Text.Trim() -notmatch '^[A-Za-z0-9_]+$') {
+		[System.Windows.Forms.MessageBox]::Show("Keyword can contain only letters, numbers, and underscores.", "Allow Keyword", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+		return
+	}
+	foreach ($dangerKeyword in $DangerKeywords) {
+		if ([string]::Equals([string]$dangerKeyword, $txtKeyword.Text.Trim(), [System.StringComparison]::OrdinalIgnoreCase)) {
+			[System.Windows.Forms.MessageBox]::Show("This keyword matches danger_keywords exactly and cannot be added.", "Allow Keyword", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+			return
+		}
 	}
 	if ([string]::IsNullOrWhiteSpace($WhitelistPath)) {
 		[System.Windows.Forms.MessageBox]::Show("Whitelist path is unavailable.", "Allow Keyword", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null

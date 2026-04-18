@@ -500,6 +500,7 @@ func (s *Server) tryConfirmDangerousSQL(req *jsonRPCRequest, sql, displayConnect
 			WhitelistPath:               whitelistPath(s.whitelist),
 			WhitelistConnection:         connectionKey,
 			ReviewTriggerDetails:        formatReviewTriggerDetails(unresolvedMatches),
+			DangerKeywords:              s.config.Security.DangerKeywords,
 		}
 		confirmResult, err := s.confirmer.Confirm(confirmReq)
 		if err != nil {
@@ -550,6 +551,7 @@ func (s *Server) tryConfirmDangerousSQL(req *jsonRPCRequest, sql, displayConnect
 		SourceLabel:         sourceLabel,
 		WhitelistPath:       whitelistPath(s.whitelist),
 		WhitelistConnection: connectionKey,
+		DangerKeywords:      s.config.Security.DangerKeywords,
 	}
 	confirmResult, err := s.confirmer.Confirm(confirmReq)
 	if err != nil {
