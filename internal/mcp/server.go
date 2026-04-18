@@ -445,7 +445,7 @@ func (s *Server) tryConfirmDangerousSQL(req *jsonRPCRequest, sql, displayConnect
 		connectionKey = "default"
 	}
 	if s.whitelist != nil {
-		allowed, err := s.whitelist.Contains(connectionKey, headerLine)
+		allowed, err := s.whitelist.ContainsHeadLine(connectionKey, headerLine)
 		if err != nil {
 			s.logAudit(sql, analysis.MatchedKeywords, audit.ApprovalRejected, "WHITELIST_ERROR: "+err.Error(), displayConnection, nil)
 			s.sendToolError(req.ID, fmt.Sprintf("Whitelist read error: %v", err))
@@ -468,7 +468,6 @@ func (s *Server) tryConfirmDangerousSQL(req *jsonRPCRequest, sql, displayConnect
 		Connection:      displayConnection,
 		ConnectionIndex: connectionIndexInPool(s.executorPool, displayConnection),
 		SourceLabel:     sourceLabel,
-		HeaderLine:      headerLine,
 	}
 	confirmResult, err := s.confirmer.Confirm(confirmReq)
 	if err != nil {
@@ -486,12 +485,28 @@ func (s *Server) tryConfirmDangerousSQL(req *jsonRPCRequest, sql, displayConnect
 	}
 
 	approval := audit.ApprovalApproved
+	if confirmResult.AllowKeyword {
+		keyword := strings.TrimSpace(confirmResult.Keyword)
+		if keyword == "" {
+			s.sendToolError(req.ID, "Keyword cannot be empty")
+			return nil, false
+		}
+		if s.whitelist == nil {
+			s.sendToolError(req.ID, "Whitelist is not available")
+			return nil, false
+		}
+		if err := s.whitelist.AddKeyword(connectionKey, keyword); err != nil {
+			s.logAudit(sql, analysis.MatchedKeywords, audit.ApprovalRejected, "WHITELIST_ERROR: "+err.Error(), displayConnection, nil)
+			s.sendToolError(req.ID, fmt.Sprintf("Whitelist write error: %v", err))
+			return nil, false
+		}
+	}
 	if confirmResult.AllowHeader {
 		if s.whitelist == nil {
 			s.sendToolError(req.ID, "Whitelist is not available")
 			return nil, false
 		}
-		if err := s.whitelist.Add(connectionKey, headerLine); err != nil {
+		if err := s.whitelist.AddHeadLine(connectionKey, headerLine); err != nil {
 			s.logAudit(sql, analysis.MatchedKeywords, audit.ApprovalRejected, "WHITELIST_ERROR: "+err.Error(), displayConnection, nil)
 			s.sendToolError(req.ID, fmt.Sprintf("Whitelist write error: %v", err))
 			return nil, false

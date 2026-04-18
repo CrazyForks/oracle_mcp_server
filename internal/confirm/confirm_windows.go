@@ -57,13 +57,14 @@ type ConfirmRequest struct {
 	// ConnectionIndex is the 0-based index in the configured connections list; selects header bar color (same palette as Java).
 	ConnectionIndex int
 	SourceLabel     string // Optional, e.g. "File: path/to/file.sql" for execute_sql_file
-	HeaderLine      string
 }
 
 // ConfirmResult reports how the review dialog was approved.
 type ConfirmResult struct {
-	Approved    bool
-	AllowHeader bool
+	Approved     bool
+	AllowHeader  bool
+	AllowKeyword bool
+	Keyword      string
 }
 
 // Confirmer handles user confirmation dialogs.
@@ -82,7 +83,7 @@ func (c *Confirmer) Confirm(req *ConfirmRequest) (ConfirmResult, error) {
 	resultPath := filepath.Join(sqlDir, "oracle-mcp-confirm-result.txt")
 	scriptPath := filepath.Join(sqlDir, "oracle-mcp-confirm-dialog.ps1")
 	headerPath := filepath.Join(sqlDir, "oracle-mcp-confirm-header.txt")
-	headerLinePath := filepath.Join(sqlDir, "oracle-mcp-confirm-header-line.txt")
+	keywordPath := filepath.Join(sqlDir, "oracle-mcp-confirm-keyword.txt")
 
 	htmlContent := sqlHighlightHTML(req.SQL)
 	htmlContent = highlightMatchedKeywordsInHTML(htmlContent, highlightTermsForReview(req))
@@ -97,10 +98,7 @@ func (c *Confirmer) Confirm(req *ConfirmRequest) (ConfirmResult, error) {
 	}
 	defer os.Remove(headerPath)
 
-	if err := os.WriteFile(headerLinePath, []byte(req.HeaderLine), 0600); err != nil {
-		return ConfirmResult{}, fmt.Errorf("confirm: cannot write header line temp file: %w", err)
-	}
-	defer os.Remove(headerLinePath)
+	defer os.Remove(keywordPath)
 
 	if err := os.WriteFile(scriptPath, []byte(ps1Script), 0600); err != nil {
 		return ConfirmResult{}, fmt.Errorf("confirm: cannot write script temp file: %w", err)
@@ -116,7 +114,7 @@ func (c *Confirmer) Confirm(req *ConfirmRequest) (ConfirmResult, error) {
 
 	// -STA required for Windows Forms to display correctly
 	cmd := exec.Command("powershell.exe", "-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-File", scriptPath,
-		"-HtmlPath", htmlPath, "-ResultPath", resultPath, "-HeaderPath", headerPath, "-HeaderLinePath", headerLinePath, "-Connection", connectionArg, "-HeaderColor", headerColor)
+		"-HtmlPath", htmlPath, "-ResultPath", resultPath, "-HeaderPath", headerPath, "-KeywordPath", keywordPath, "-Connection", connectionArg, "-HeaderColor", headerColor)
 	cmd.Stdin = nil
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
@@ -148,6 +146,13 @@ func (c *Confirmer) Confirm(req *ConfirmRequest) (ConfirmResult, error) {
 	switch s {
 	case "1":
 		return ConfirmResult{Approved: true}, nil
+	case "allow_keyword":
+		keywordData, err := os.ReadFile(keywordPath)
+		if err != nil && !os.IsNotExist(err) {
+			return ConfirmResult{}, fmt.Errorf("confirm: cannot read keyword temp file: %w", err)
+		}
+		keyword := strings.TrimSpace(string(bytes.TrimPrefix(keywordData, []byte{0xEF, 0xBB, 0xBF})))
+		return ConfirmResult{Approved: true, AllowKeyword: true, Keyword: keyword}, nil
 	case "allow_header":
 		return ConfirmResult{Approved: true, AllowHeader: true}, nil
 	default:
@@ -477,9 +482,8 @@ func truncateSQL(sql string, maxLen int) string {
 
 // ps1Script is the PowerShell script for the confirmation form (WebBrowser with HTML syntax-highlighted SQL).
 const ps1Script = `
-param([string]$HtmlPath, [string]$ResultPath, [string]$HeaderPath, [string]$HeaderLinePath, [string]$Connection = "default", [string]$HeaderColor = "A5D6A7")
+param([string]$HtmlPath, [string]$ResultPath, [string]$HeaderPath, [string]$KeywordPath, [string]$Connection = "default", [string]$HeaderColor = "A5D6A7")
 $Header = if (Test-Path $HeaderPath) { [System.IO.File]::ReadAllText($HeaderPath, [System.Text.Encoding]::UTF8) } else { "Confirm SQL execution" }
-$HeaderLine = if (Test-Path $HeaderLinePath) { [System.IO.File]::ReadAllText($HeaderLinePath, [System.Text.Encoding]::UTF8) } else { "" }
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
@@ -517,14 +521,28 @@ $browser.IsWebBrowserContextMenuEnabled = $false
 $browser.ScriptErrorsSuppressed = $true
 $browser.Navigate($fileUri.AbsoluteUri)
 
-$txtHeaderLine = New-Object System.Windows.Forms.TextBox
-$txtHeaderLine.Location = New-Object System.Drawing.Point(10, 670)
-$txtHeaderLine.Size = New-Object System.Drawing.Size(570, 28)
-$txtHeaderLine.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
-$txtHeaderLine.ReadOnly = $true
-$txtHeaderLine.Text = $HeaderLine
-$txtHeaderLine.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
-$form.Controls.Add($txtHeaderLine)
+$txtKeyword = New-Object System.Windows.Forms.TextBox
+$txtKeyword.Location = New-Object System.Drawing.Point(10, 670)
+$txtKeyword.Size = New-Object System.Drawing.Size(460, 28)
+$txtKeyword.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+$txtKeyword.BorderStyle = [System.Windows.Forms.BorderStyle]::FixedSingle
+$form.Controls.Add($txtKeyword)
+
+$btnAllowKeyword = New-Object System.Windows.Forms.Button
+$btnAllowKeyword.Text = "Allow Keyword"
+$btnAllowKeyword.Location = New-Object System.Drawing.Point(480, 670)
+$btnAllowKeyword.Size = New-Object System.Drawing.Size(100, 28)
+$btnAllowKeyword.Anchor = [System.Windows.Forms.AnchorStyles]::Bottom -bor [System.Windows.Forms.AnchorStyles]::Right
+$btnAllowKeyword.Add_Click({
+	if ([string]::IsNullOrWhiteSpace($txtKeyword.Text)) {
+		[System.Windows.Forms.MessageBox]::Show("Please enter a keyword first.", "Allow Keyword", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+		return
+	}
+	$form.Tag = "allow_keyword"
+	$form.DialogResult = [System.Windows.Forms.DialogResult]::OK
+	$form.Close()
+})
+$form.Controls.Add($btnAllowKeyword)
 
 $btnAllowHeader = New-Object System.Windows.Forms.Button
 $btnAllowHeader.Text = "Allow Header"
@@ -561,7 +579,11 @@ $form.Controls.SetChildIndex($browser, 1)
 $form.Add_Shown({ $form.ActiveControl = $browser })
 $result = $form.ShowDialog()
 $utf8NoBom = New-Object System.Text.UTF8Encoding $false
-if ($form.Tag -eq "allow_header") { [IO.File]::WriteAllText($ResultPath, "allow_header", $utf8NoBom) }
+if ($form.Tag -eq "allow_keyword") {
+	[IO.File]::WriteAllText($KeywordPath, $txtKeyword.Text.Trim(), $utf8NoBom)
+	[IO.File]::WriteAllText($ResultPath, "allow_keyword", $utf8NoBom)
+}
+elseif ($form.Tag -eq "allow_header") { [IO.File]::WriteAllText($ResultPath, "allow_header", $utf8NoBom) }
 elseif ($result -eq [System.Windows.Forms.DialogResult]::OK) { [IO.File]::WriteAllText($ResultPath, "1", $utf8NoBom) }
 else { [IO.File]::WriteAllText($ResultPath, "0", $utf8NoBom) }
 `

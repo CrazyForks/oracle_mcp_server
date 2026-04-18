@@ -20,13 +20,14 @@ type ConfirmRequest struct {
 	Connection                  string
 	ConnectionIndex             int
 	SourceLabel                 string
-	HeaderLine                  string
 }
 
 // ConfirmResult reports how the review dialog was approved.
 type ConfirmResult struct {
-	Approved    bool
-	AllowHeader bool
+	Approved     bool
+	AllowHeader  bool
+	AllowKeyword bool
+	Keyword      string
 }
 
 // Confirmer handles user confirmation dialogs on macOS.
