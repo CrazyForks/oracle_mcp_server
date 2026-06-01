@@ -4,11 +4,14 @@
 package confirm
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 )
 
 // ConfirmRequest contains the data for a confirmation dialog.
@@ -51,6 +54,7 @@ func (c *Confirmer) Confirm(req *ConfirmRequest) (ConfirmResult, error) {
 	headerPath := filepath.Join(sqlDir, "oracle-mcp-confirm-header.txt")
 	sqlPath := filepath.Join(sqlDir, "oracle-mcp-confirm-sql.txt")
 	dangerKeywordsPath := filepath.Join(sqlDir, "oracle-mcp-confirm-danger-keywords.json")
+	highlightTermsPath := filepath.Join(sqlDir, "oracle-mcp-confirm-highlight-terms.json")
 
 	if err := os.WriteFile(headerPath, []byte(buildConfirmHeader(req)), 0600); err != nil {
 		return ConfirmResult{}, fmt.Errorf("confirm: cannot write header temp file: %w", err)
@@ -78,6 +82,19 @@ func (c *Confirmer) Confirm(req *ConfirmRequest) (ConfirmResult, error) {
 	}
 	defer os.Remove(dangerKeywordsPath)
 
+	highlightTerms := highlightTermsForReview(req)
+	if highlightTerms == nil {
+		highlightTerms = []string{}
+	}
+	highlightTermsJSON, err := json.Marshal(highlightTerms)
+	if err != nil {
+		return ConfirmResult{}, fmt.Errorf("confirm: cannot marshal highlight terms: %w", err)
+	}
+	if err := os.WriteFile(highlightTermsPath, highlightTermsJSON, 0600); err != nil {
+		return ConfirmResult{}, fmt.Errorf("confirm: cannot write highlight terms temp file: %w", err)
+	}
+	defer os.Remove(highlightTermsPath)
+
 	if err := os.WriteFile(scriptPath, []byte(jxaScript), 0600); err != nil {
 		return ConfirmResult{}, fmt.Errorf("confirm: cannot write script temp file: %w", err)
 	}
@@ -87,10 +104,14 @@ func (c *Confirmer) Confirm(req *ConfirmRequest) (ConfirmResult, error) {
 	if connectionArg == "" {
 		connectionArg = "default"
 	}
+	headerColor := headerBarColor(req.ConnectionIndex)
 
 	cmd := exec.Command("osascript", "-l", "JavaScript", scriptPath,
-		headerPath, sqlPath, resultPath, req.WhitelistPath, req.WhitelistConnection, dangerKeywordsPath, connectionArg)
+		headerPath, sqlPath, resultPath, req.WhitelistPath, req.WhitelistConnection, dangerKeywordsPath, connectionArg, headerColor, highlightTermsPath)
 	output, err := cmd.Output()
+	if result, ok := readConfirmResultFile(resultPath); ok {
+		return result, nil
+	}
 	if err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			if exitErr.ExitCode() == 1 || strings.Contains(string(exitErr.Stderr), "-128") {
@@ -100,13 +121,35 @@ func (c *Confirmer) Confirm(req *ConfirmRequest) (ConfirmResult, error) {
 		return ConfirmResult{}, fmt.Errorf("dialog error: %w", err)
 	}
 
-	switch strings.TrimSpace(string(output)) {
+	if result, ok := parseConfirmResult(strings.TrimSpace(string(output))); ok {
+		return result, nil
+	}
+	return ConfirmResult{}, nil
+}
+
+func readConfirmResultFile(path string) (ConfirmResult, bool) {
+	for attempt := 0; attempt < 20; attempt++ {
+		data, err := os.ReadFile(path)
+		if err == nil && len(data) > 0 {
+			return parseConfirmResult(strings.TrimSpace(string(data)))
+		}
+		if attempt < 19 {
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	return ConfirmResult{}, false
+}
+
+func parseConfirmResult(value string) (ConfirmResult, bool) {
+	switch value {
 	case "1":
-		return ConfirmResult{Approved: true}, nil
+		return ConfirmResult{Approved: true}, true
 	case "allow_header":
-		return ConfirmResult{Approved: true, AllowHeader: true}, nil
+		return ConfirmResult{Approved: true, AllowHeader: true}, true
+	case "0":
+		return ConfirmResult{}, true
 	default:
-		return ConfirmResult{}, nil
+		return ConfirmResult{}, false
 	}
 }
 
@@ -143,6 +186,52 @@ func buildConfirmHeader(req *ConfirmRequest) string {
 	if out == "" {
 		return "Confirm SQL execution"
 	}
+	return out
+}
+
+// Same palette as Windows Confirmer.HEADER_COLORS (connection index mod length).
+var headerBarColors = []string{
+	"A5D6A7", "90CAF9", "FFCC80", "CE93D8", "F48FB1",
+	"80DEEA", "EF9A9A", "80CBC4", "FFF59D", "BCAAA4",
+}
+
+func headerBarColor(connectionIndex int) string {
+	if connectionIndex < 0 {
+		connectionIndex = 0
+	}
+	return headerBarColors[connectionIndex%len(headerBarColors)]
+}
+
+// highlightTermsForReview merges keyword and action strings for red markup (aligned with Windows).
+func highlightTermsForReview(req *ConfirmRequest) []string {
+	seen := make(map[string]struct{})
+	var out []string
+	add := func(s string) {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return
+		}
+		key := strings.ToLower(s)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		out = append(out, s)
+	}
+	kwSrc := req.MatchedKeywords
+	if len(req.MatchedKeywordsForHighlight) > 0 {
+		kwSrc = req.MatchedKeywordsForHighlight
+	}
+	for _, k := range kwSrc {
+		add(k)
+	}
+	for _, a := range req.MatchedActions {
+		add(a)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	sort.Slice(out, func(i, j int) bool { return len(out[i]) > len(out[j]) })
 	return out
 }
 
@@ -198,35 +287,83 @@ func truncateSQL(sql string, maxLen int) string {
 }
 
 const jxaScript = `
-ObjC.import('AppKit');
-ObjC.import('Foundation');
+	ObjC.import('AppKit');
+	ObjC.import('Foundation');
 
-function run(argv) {
+	let modalAction = -1;
+	ObjC.registerSubclass({
+	  name: "OracleMCPConfirmDialogHandler",
+	  protocols: ["NSWindowDelegate"],
+	  methods: {
+	    "buttonClicked:": {
+	      types: ["void", ["id"]],
+	      implementation: function(sender) {
+	        modalAction = Number(sender.tag);
+	        $.NSApp.stopModalWithCode(modalAction);
+	      }
+	    },
+	    "windowShouldClose:": {
+	      types: ["bool", ["id"]],
+	      implementation: function(sender) {
+	        modalAction = 0;
+	        $.NSApp.stopModalWithCode(0);
+	        return true;
+	      }
+	    }
+	  }
+	});
+
+	ObjC.registerSubclass({
+	  name: "OracleMCPConfirmWindow",
+	  superclass: "NSWindow",
+	  methods: {
+	    "performKeyEquivalent:": {
+	      types: ["bool", ["id"]],
+	      implementation: function(event) {
+	        return handleWindowShortcut(this, event);
+	      }
+	    }
+	  }
+	});
+	
+	function run(argv) {
   const headerPath = argv[0];
   const sqlPath = argv[1];
   const resultPath = argv[2];
   const whitelistPath = argv[3];
-  const whitelistConnection = argv[4] || "default";
-  const dangerKeywordsPath = argv[5];
-  const connectionName = argv[6] || "default";
+	  const whitelistConnection = argv[4] || "default";
+	  const dangerKeywordsPath = argv[5];
+	  const connectionName = argv[6] || "default";
+	  const headerColor = argv[7] || "A5D6A7";
+	  const highlightTermsPath = argv[8];
 
   const app = Application.currentApplication();
   app.includeStandardAdditions = true;
 
-  const header = readTextFile(headerPath) || "Confirm SQL execution";
-  const sqlText = readTextFile(sqlPath) || "";
-  const dangerKeywords = readJSONFile(dangerKeywordsPath, []);
-  let keywordText = "";
+	  const header = readTextFile(headerPath) || "Confirm SQL execution";
+	  const sqlText = readTextFile(sqlPath) || "";
+	  const dangerKeywords = readJSONFile(dangerKeywordsPath, []);
+	  const highlightTerms = readJSONFile(highlightTermsPath, []);
+	  let keywordText = "";
+	  activateDialogApp();
 
-  while (true) {
-    const ui = buildAlert(connectionName, header, sqlText, keywordText);
-    const response = ui.alert.runModal();
-    keywordText = ObjC.unwrap(ui.keywordField.stringValue);
+	  while (true) {
+	    const ui = buildDialog(connectionName, header, sqlText, keywordText, headerColor, highlightTerms);
+	    const response = showDialog(ui);
+	    keywordText = ObjC.unwrap(ui.keywordField.stringValue);
 
-    if (response === 1000) {
-      const trimmed = keywordText.trim();
-      const validationError = validateKeyword(trimmed, dangerKeywords);
-      if (validationError) {
+	    if (response === 1) {
+	      writeResult(resultPath, "1");
+	      return "1";
+	    }
+	    if (response === 0) {
+	      writeResult(resultPath, "0");
+	      return "0";
+	    }
+	    if (response === 2) {
+	      const trimmed = keywordText.trim();
+	      const validationError = validateKeyword(trimmed, dangerKeywords);
+	      if (validationError) {
         app.displayAlert("Allow Keyword", {message: validationError});
         continue;
       }
@@ -240,60 +377,256 @@ function run(argv) {
         keywordText = "";
       } catch (error) {
         app.displayAlert("Allow Keyword", {message: "Failed to update whitelist.json: " + error});
-      }
-      continue;
-    }
-    if (response === 1001) {
-      writeResult(resultPath, "allow_header");
-      return "allow_header";
-    }
-    if (response === 1002) {
-      writeResult(resultPath, "1");
-      return "1";
-    }
+	      }
+	      continue;
+	    }
+	    if (response === 3) {
+	      writeResult(resultPath, "allow_header");
+	      return "allow_header";
+	    }
 
     writeResult(resultPath, "0");
     return "0";
-  }
-}
+	  }
+	}
+	
+	function buildDialog(connectionName, header, sqlText, keywordText, headerColor, highlightTerms) {
+	  const windowWidth = 820;
+	  const windowHeight = 620;
+	  const handler = $.OracleMCPConfirmDialogHandler.alloc.init;
+	  const window = $.OracleMCPConfirmWindow.alloc.initWithContentRectStyleMaskBackingDefer(
+	    $.NSMakeRect(0, 0, windowWidth, windowHeight),
+	    $.NSTitledWindowMask | $.NSClosableWindowMask | $.NSMiniaturizableWindowMask,
+	    $.NSBackingStoreBuffered,
+	    false
+	  );
+	  window.title = "Confirm SQL — " + connectionName;
+	  window.setDelegate(handler);
+	
+	  const container = $.NSView.alloc.initWithFrame($.NSMakeRect(0, 0, windowWidth, windowHeight));
+	  window.setContentView(container);
+	
+	  addHeaderBanner(container, header, headerColor, windowWidth, windowHeight);
+	
+	  const scrollView = $.NSScrollView.alloc.initWithFrame($.NSMakeRect(20, 120, 780, 440));
+	  scrollView.hasVerticalScroller = true;
+	  scrollView.hasHorizontalScroller = false;
+	  scrollView.borderType = $.NSBezelBorder;
 
-function buildAlert(connectionName, header, sqlText, keywordText) {
-  const alert = $.NSAlert.alloc.init;
-  alert.messageText = "Confirm SQL — " + connectionName;
-  alert.informativeText = header;
-  alert.addButtonWithTitle("Allow Keyword");
-  alert.addButtonWithTitle("Allow Header");
-  alert.addButtonWithTitle("Execute");
-  alert.addButtonWithTitle("Cancel");
-  alert.alertStyle = $.NSAlertStyleWarning;
+	  const textView = $.NSTextView.alloc.initWithFrame($.NSMakeRect(0, 0, 760, 440));
+	  textView.setEditable(false);
+	  textView.setSelectable(true);
+	  setSQLText(textView, sqlText, highlightTerms);
+	  scrollView.documentView = textView;
+	  container.addSubview(scrollView);
 
-  const container = $.NSView.alloc.initWithFrame($.NSMakeRect(0, 0, 720, 420));
+	  const label = $.NSTextField.labelWithString("Keyword:");
+	  label.setFrame($.NSMakeRect(20, 76, 70, 24));
+	  container.addSubview(label);
 
-  const scrollView = $.NSScrollView.alloc.initWithFrame($.NSMakeRect(0, 70, 720, 350));
-  scrollView.hasVerticalScroller = true;
-  scrollView.hasHorizontalScroller = false;
-  scrollView.borderType = $.NSBezelBorder;
+	  const keywordField = $.NSTextField.alloc.initWithFrame($.NSMakeRect(90, 72, 710, 28));
+	  keywordField.setStringValue($(keywordText || ""));
+	  container.addSubview(keywordField);
 
-  const textView = $.NSTextView.alloc.initWithFrame($.NSMakeRect(0, 0, 700, 350));
-  textView.setEditable(false);
-  textView.setSelectable(true);
-  textView.setString($(sqlText));
-  scrollView.documentView = textView;
-  container.addSubview(scrollView);
+	  addButton(container, handler, "Allow Keyword", 2, 374, 24, 112);
+	  addButton(container, handler, "Allow Header", 3, 496, 24, 104);
+	  addButton(container, handler, "Execute", 1, 610, 24, 90);
+	  addButton(container, handler, "Cancel", 0, 710, 24, 90);
+	
+	  return {window: window, keywordField: keywordField, textView: textView, handler: handler};
+	}
+	
+	function activateDialogApp() {
+  const nsApp = $.NSApplication.sharedApplication;
+  nsApp.setActivationPolicy($.NSApplicationActivationPolicyAccessory);
+	  nsApp.activateIgnoringOtherApps(true);
+	}
+	
+	function showDialog(ui) {
+	  modalAction = -1;
+	  activateDialogApp();
+	
+	  const window = ui.window;
+	  if (window) {
+	    window.setLevel($.NSModalPanelWindowLevel);
+	    window.center;
+	    window.makeKeyAndOrderFront(null);
+	    window.orderFrontRegardless;
+	    if (ui.textView) {
+	      window.makeFirstResponder(ui.textView);
+	    }
+	  }
+	
+	  let response = 0;
+	  try {
+	    response = $.NSApp.runModalForWindow(window);
+	  } finally {
+	    window.orderOut(null);
+	  }
+	  if (modalAction >= 0) {
+	    return modalAction;
+	  }
+	  return Number(response);
+	}
 
-  const label = $.NSTextField.labelWithString("Keyword:");
-  label.setFrame($.NSMakeRect(0, 36, 100, 24));
-  container.addSubview(label);
+	function handleWindowShortcut(window, event) {
+	  if (!window || !event) {
+	    return false;
+	  }
+	  const flags = Number(event.modifierFlags);
+	  if ((flags & Number($.NSEventModifierFlagCommand)) === 0) {
+	    return false;
+	  }
+	  const key = String(ObjC.unwrap(event.charactersIgnoringModifiers) || "").toLowerCase();
+	  if (key.length !== 1) {
+	    return false;
+	  }
 
-  const keywordField = $.NSTextField.alloc.initWithFrame($.NSMakeRect(80, 32, 640, 28));
-  keywordField.setStringValue($(keywordText || ""));
-  container.addSubview(keywordField);
+	  const target = shortcutTargetForResponder(window.firstResponder);
+	  if (!target) {
+	    return false;
+	  }
+	  if (key === "c" && target.respondsToSelector($.NSSelectorFromString("copy:"))) {
+	    target.copy(target);
+	    return true;
+	  }
+	  if (key === "v" && target.respondsToSelector($.NSSelectorFromString("paste:"))) {
+	    target.paste(target);
+	    return true;
+	  }
+	  if (key === "a" && target.respondsToSelector($.NSSelectorFromString("selectAll:"))) {
+	    target.selectAll(target);
+	    return true;
+	  }
+	  if (key === "x" && target.respondsToSelector($.NSSelectorFromString("cut:"))) {
+	    target.cut(target);
+	    return true;
+	  }
+	  return false;
+	}
 
-  alert.accessoryView = container;
-  return {alert: alert, keywordField: keywordField};
-}
+	function shortcutTargetForResponder(responder) {
+	  if (!responder) {
+	    return null;
+	  }
+	  if (
+	    responder.respondsToSelector($.NSSelectorFromString("copy:")) ||
+	    responder.respondsToSelector($.NSSelectorFromString("paste:")) ||
+	    responder.respondsToSelector($.NSSelectorFromString("selectAll:"))
+	  ) {
+	    return responder;
+	  }
+	  if (responder.respondsToSelector($.NSSelectorFromString("currentEditor"))) {
+	    const editor = responder.currentEditor;
+	    if (
+	      editor &&
+	      (
+	        editor.respondsToSelector($.NSSelectorFromString("copy:")) ||
+	        editor.respondsToSelector($.NSSelectorFromString("paste:")) ||
+	        editor.respondsToSelector($.NSSelectorFromString("selectAll:"))
+	      )
+	    ) {
+	      return editor;
+	    }
+	  }
+	  return null;
+	}
+	
+	function makeLabel(text, frame) {
+	  const label = $.NSTextField.alloc.initWithFrame(frame);
+	  label.setStringValue($(text));
+	  label.setBezeled(false);
+	  label.setDrawsBackground(false);
+	  label.setEditable(false);
+	  label.setSelectable(false);
+	  return label;
+	}
 
-function validateKeyword(keyword, dangerKeywords) {
+	function addHeaderBanner(container, header, headerColor, windowWidth, windowHeight) {
+	  const bannerHeight = 42;
+	  const banner = $.NSTextField.alloc.initWithFrame($.NSMakeRect(0, windowHeight - bannerHeight, windowWidth, bannerHeight));
+	  banner.setStringValue($(""));
+	  banner.setBezeled(false);
+	  banner.setDrawsBackground(true);
+	  banner.setEditable(false);
+	  banner.setSelectable(false);
+	  banner.setBackgroundColor(nsColorFromHex(headerColor));
+	  container.addSubview(banner);
+	
+	  const label = makeLabel(String(header || "").trim(), $.NSMakeRect(12, windowHeight - bannerHeight + 8, windowWidth - 24, 24));
+	  label.setFont($.NSFont.boldSystemFontOfSize(13));
+	  label.setTextColor($.NSColor.blackColor);
+	  label.setSelectable(true);
+	  container.addSubview(label);
+	}
+
+	function nsColorFromHex(hex) {
+	  let value = String(hex || "A5D6A7").replace(/^#/, "");
+	  if (!/^[0-9A-Fa-f]{6}$/.test(value)) {
+	    value = "A5D6A7";
+	  }
+	  const red = parseInt(value.slice(0, 2), 16) / 255.0;
+	  const green = parseInt(value.slice(2, 4), 16) / 255.0;
+	  const blue = parseInt(value.slice(4, 6), 16) / 255.0;
+	  return $.NSColor.colorWithCalibratedRedGreenBlueAlpha(red, green, blue, 1.0);
+	}
+
+	function setSQLText(textView, sqlText, highlightTerms) {
+	  const baseFont = $.NSFont.userFixedPitchFontOfSize(12);
+	  textView.setFont(baseFont);
+	  textView.setString($(sqlText));
+	
+	  const storage = textView.textStorage;
+	  const fullRange = $.NSMakeRange(0, storage.length);
+	  if (storage.length > 0) {
+	    storage.addAttributeValueRange($.NSFontAttributeName, baseFont, fullRange);
+	    storage.addAttributeValueRange($.NSForegroundColorAttributeName, $.NSColor.textColor, fullRange);
+	  }
+	  applyHighlightTerms(storage, sqlText, highlightTerms, baseFont);
+	}
+
+	function applyHighlightTerms(storage, sqlText, highlightTerms, baseFont) {
+	  if (!Array.isArray(highlightTerms) || !sqlText) {
+	    return;
+	  }
+	  const red = $.NSColor.redColor;
+	  const boldFont = $.NSFontManager.sharedFontManager.convertFontToHaveTrait(baseFont, $.NSBoldFontMask);
+	  for (let i = 0; i < highlightTerms.length; i++) {
+	    const term = String(highlightTerms[i] || "").trim();
+	    if (!term) {
+	      continue;
+	    }
+	    const re = new RegExp("\\b" + escapeRegExp(term) + "\\b", "gi");
+	    let match;
+	    while ((match = re.exec(sqlText)) !== null) {
+	      if (!match[0]) {
+	        re.lastIndex++;
+	        continue;
+	      }
+	      const range = $.NSMakeRange(match.index, match[0].length);
+	      storage.addAttributeValueRange($.NSForegroundColorAttributeName, red, range);
+	      storage.addAttributeValueRange($.NSFontAttributeName, boldFont, range);
+	    }
+	  }
+	}
+
+	function escapeRegExp(text) {
+	  return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	}
+	
+	function addButton(container, handler, title, tag, x, y, width) {
+	  const button = $.NSButton.alloc.initWithFrame($.NSMakeRect(x, y, width, 30));
+	  button.title = title;
+	  button.setBezelStyle($.NSBezelStyleRounded);
+	  button.setKeyEquivalent("");
+	  button.setTarget(handler);
+	  button.setAction("buttonClicked:");
+	  button.setTag(tag);
+	  container.addSubview(button);
+	  return button;
+	}
+	
+	function validateKeyword(keyword, dangerKeywords) {
   if (!keyword) {
     return "Please enter a keyword first.";
   }
@@ -311,7 +644,8 @@ function validateKeyword(keyword, dangerKeywords) {
 function readTextFile(path) {
   if (!path) return "";
   const str = $.NSString.stringWithContentsOfFileEncodingError($(path), $.NSUTF8StringEncoding, null);
-  return str ? ObjC.unwrap(str) : "";
+  const text = str ? ObjC.unwrap(str) : "";
+  return text == null ? "" : String(text);
 }
 
 function readJSONFile(path, fallbackValue) {
@@ -352,7 +686,23 @@ function saveWhitelistKeyword(path, connectionName, keyword) {
   }
 
   const jsonText = JSON.stringify(items, null, 2) + "\n";
-  $(jsonText).writeToFileAtomicallyEncodingError($(path), true, $.NSUTF8StringEncoding, null);
+  ensureParentDirectory(path);
+  const wrote = $(jsonText).writeToFileAtomicallyEncodingError($(path), true, $.NSUTF8StringEncoding, null);
+  if (!wrote) {
+    throw "writeToFile failed for " + path;
+  }
+}
+
+function ensureParentDirectory(path) {
+  const parent = $(path).stringByDeletingLastPathComponent;
+  const parentText = ObjC.unwrap(parent);
+  if (!parentText || parentText === "." || parentText === String(path)) {
+    return;
+  }
+  const created = $.NSFileManager.defaultManager.createDirectoryAtPathWithIntermediateDirectoriesAttributesError(parent, true, $.NSDictionary.dictionary, null);
+  if (!created) {
+    throw "could not create directory " + parentText;
+  }
 }
 
 function normalizeWhitelistEntry(entry) {

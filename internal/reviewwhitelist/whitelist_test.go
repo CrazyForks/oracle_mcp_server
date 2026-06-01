@@ -102,6 +102,20 @@ func TestStoreLoadsLegacyHeaderLineFormat(t *testing.T) {
 	}
 }
 
+func TestStoreCreatesMissingParentDirectory(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "missing", "nested", "whitelist.json")
+	store := NewStore(path)
+
+	if err := store.AddHeadLine("play", "CREATE TABLE demo (id NUMBER)"); err != nil {
+		t.Fatalf("AddHeadLine returned error for missing parent directory: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("whitelist file was not created: %v", err)
+	}
+}
+
 func TestContainsKeywordCIHonorsConnection(t *testing.T) {
 	t.Parallel()
 

@@ -181,6 +181,9 @@ func (s *Store) saveLocked(entries []Entry) error {
 		return fmt.Errorf("marshal whitelist: %w", err)
 	}
 	data = append(data, '\n')
+	if err := os.MkdirAll(filepath.Dir(s.path), 0755); err != nil {
+		return fmt.Errorf("create whitelist directory %s: %w", filepath.Dir(s.path), err)
+	}
 	if err := os.WriteFile(s.path, data, 0644); err != nil {
 		return fmt.Errorf("write whitelist file %s: %w", s.path, err)
 	}
