@@ -9,7 +9,7 @@ Supports connecting to any database via JDBC.
 ---
 # Oracle MCP Server
 
-A Model Context Protocol (MCP) server for Oracle Database, enabling AI assistants like Cursor to execute SQL statements directly against Oracle databases.
+A Model Context Protocol (MCP) server for Oracle Database, enabling AI assistants like Cursor to execute SQL statements directly against Oracle databases. Oracle trademark, database, and Instant Client are properties of the Oracle company, they are not part of this solution.
 
 **Alvin Liu** — [https://alvinliu.com](https://alvinliu.com) · **Project:** [https://github.com/kjstart/cursor_oracle_mcp_server](https://github.com/kjstart/cursor_oracle_mcp_server)
 
@@ -389,7 +389,7 @@ MIT License - see [LICENSE](LICENSE) file
 ---
 # Oracle MCP Server（中文）
 
-基于 Model Context Protocol (MCP) 的 Oracle 数据库服务端，让 Cursor 等 AI 助手直接对 Oracle 数据库执行 SQL。
+基于 Model Context Protocol (MCP) 的 Oracle 数据库服务端，让 Cursor 等 AI 助手直接对 Oracle 数据库执行 SQL。Oracle 商标, 数据库和Instant Client属于Oracle公司, 不是本方案的一部分.
 
 **作者：Alvin Liu** — [https://alvinliu.com](https://alvinliu.com) · **项目：** [https://github.com/kjstart/cursor_oracle_mcp_server](https://github.com/kjstart/cursor_oracle_mcp_server)
 
